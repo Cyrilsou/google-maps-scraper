@@ -68,6 +68,13 @@ func ValidateEmails(ctx context.Context, emails []string) []string {
 }
 
 func domainHasMX(ctx context.Context, domain string) bool {
+	// Fast path: if the caller's ctx is already done, skip the lookup AND
+	// skip the cache write. A "valid=false" cache entry for a cancelled
+	// lookup would poison future calls for this domain for mxNegativeTTL.
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+
 	mxCacheMu.RLock()
 	if ent, ok := mxCache[domain]; ok && time.Now().Before(ent.expires) {
 		mxCacheMu.RUnlock()
@@ -79,6 +86,7 @@ func domainHasMX(ctx context.Context, domain string) bool {
 	defer cancel()
 
 	valid := false
+	transient := false
 
 	if mxs, err := mxResolver.LookupMX(lookupCtx, domain); err == nil && len(mxs) > 0 {
 		valid = true
@@ -87,6 +95,14 @@ func domainHasMX(ctx context.Context, domain string) bool {
 		// can still be delivered to that host. Most small-business domains
 		// behave this way.
 		valid = true
+	} else if lookupCtx.Err() != nil {
+		// Transient error (ctx expired mid-lookup, network hiccup). Do not
+		// cache — a retry on the next call might succeed.
+		transient = true
+	}
+
+	if transient {
+		return false
 	}
 
 	ttl := mxPositiveTTL

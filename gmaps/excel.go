@@ -147,102 +147,7 @@ func writePlacesSheet(f *excelize.File, entries []*Entry) error {
 			return err
 		}
 
-		var (
-			websitePhones, socialFB, socialIG, socialLI, socialTW, socialYT string
-			hasContactForm                                                  bool
-			orgLegal, orgVAT, orgFound                                      string
-			guessedEmails, techAll, techEcom, techPay, domainRegistrar      string
-			domainAge                                                       int
-		)
-
-		if wc := e.WebsiteContact; wc != nil {
-			websitePhones = strings.Join(wc.Phones, "; ")
-			hasContactForm = wc.HasContactForm
-			socialFB = wc.SocialLinks["facebook"]
-			socialIG = wc.SocialLinks["instagram"]
-			socialLI = wc.SocialLinks["linkedin"]
-			socialTW = wc.SocialLinks["twitter"]
-			socialYT = wc.SocialLinks["youtube"]
-			orgLegal = wc.OrgLegalName
-			orgVAT = wc.OrgVATID
-			orgFound = wc.OrgFoundingDate
-			guessedEmails = strings.Join(wc.GuessedEmails, "; ")
-			domainAge = wc.DomainAgeYears
-			domainRegistrar = wc.DomainRegistrar
-
-			// Flatten tech stack: full list in one column + category
-			// shortcuts so users can filter easily in Excel.
-			allNames := make([]string, 0, len(wc.TechStack))
-			ecomNames := []string{}
-			payNames := []string{}
-
-			for _, t := range wc.TechStack {
-				allNames = append(allNames, t.Name)
-
-				switch t.Category {
-				case "ecommerce":
-					ecomNames = append(ecomNames, t.Name)
-				case "payments":
-					payNames = append(payNames, t.Name)
-				}
-			}
-
-			techAll = strings.Join(allNames, "; ")
-			techEcom = strings.Join(ecomNames, "; ")
-			techPay = strings.Join(payNames, "; ")
-		}
-
-		row := []any{
-			e.ID,
-			e.Link,
-			e.Title,
-			e.Category,
-			strings.Join(e.Categories, "; "),
-			e.Address,
-			e.CompleteAddress.Street,
-			e.CompleteAddress.City,
-			e.CompleteAddress.PostalCode,
-			e.CompleteAddress.State,
-			e.CompleteAddress.Country,
-			e.WebSite,
-			e.Phone,
-			e.PlusCode,
-			e.ReviewCount,
-			e.ReviewRating,
-			e.Latitude,
-			e.Longtitude,
-			e.Cid,
-			e.Status,
-			e.Description,
-			e.ReviewsLink,
-			e.Thumbnail,
-			e.Timezone,
-			e.PriceRange,
-			e.DataID,
-			e.PlaceID,
-			e.Menu.Link,
-			e.Owner.Name,
-			e.Owner.Link,
-			strings.Join(e.Emails, "; "),
-			len(e.Images),
-			len(e.UserReviews) + len(e.UserReviewsExtended),
-			websitePhones,
-			hasContactForm,
-			socialFB,
-			socialIG,
-			socialLI,
-			socialTW,
-			socialYT,
-			orgLegal,
-			orgVAT,
-			orgFound,
-			guessedEmails,
-			techAll,
-			techEcom,
-			techPay,
-			domainAge,
-			domainRegistrar,
-		}
+		row := placeRowValues(e)
 
 		if err := sw.SetRow(cell, row); err != nil {
 			return err
@@ -251,6 +156,111 @@ func writePlacesSheet(f *excelize.File, entries []*Entry) error {
 
 	return sw.Flush()
 }
+
+// placeRowValues builds the per-entry row for the "Places" sheet. Extracted
+// from writePlacesSheet so a test can assert len(row) == len(mainHeaders)
+// without re-running the whole Excel writer.
+func placeRowValues(e *Entry) []any {
+	var (
+		websitePhones, socialFB, socialIG, socialLI, socialTW, socialYT string
+		hasContactForm                                                  bool
+		orgLegal, orgVAT, orgFound                                      string
+		guessedEmails, techAll, techEcom, techPay, domainRegistrar      string
+		domainAge                                                       int
+	)
+
+	if wc := e.WebsiteContact; wc != nil {
+		websitePhones = strings.Join(wc.Phones, "; ")
+		hasContactForm = wc.HasContactForm
+		socialFB = wc.SocialLinks["facebook"]
+		socialIG = wc.SocialLinks["instagram"]
+		socialLI = wc.SocialLinks["linkedin"]
+		socialTW = wc.SocialLinks["twitter"]
+		socialYT = wc.SocialLinks["youtube"]
+		orgLegal = wc.OrgLegalName
+		orgVAT = wc.OrgVATID
+		orgFound = wc.OrgFoundingDate
+		guessedEmails = strings.Join(wc.GuessedEmails, "; ")
+		domainAge = wc.DomainAgeYears
+		domainRegistrar = wc.DomainRegistrar
+
+		allNames := make([]string, 0, len(wc.TechStack))
+		ecomNames := []string{}
+		payNames := []string{}
+
+		for _, t := range wc.TechStack {
+			allNames = append(allNames, t.Name)
+
+			switch t.Category {
+			case "ecommerce":
+				ecomNames = append(ecomNames, t.Name)
+			case "payments":
+				payNames = append(payNames, t.Name)
+			}
+		}
+
+		techAll = strings.Join(allNames, "; ")
+		techEcom = strings.Join(ecomNames, "; ")
+		techPay = strings.Join(payNames, "; ")
+	}
+
+	return []any{
+		e.ID,
+		e.Link,
+		e.Title,
+		e.Category,
+		strings.Join(e.Categories, "; "),
+		e.Address,
+		e.CompleteAddress.Street,
+		e.CompleteAddress.City,
+		e.CompleteAddress.PostalCode,
+		e.CompleteAddress.State,
+		e.CompleteAddress.Country,
+		e.WebSite,
+		e.Phone,
+		e.PlusCode,
+		e.ReviewCount,
+		e.ReviewRating,
+		e.Latitude,
+		e.Longtitude,
+		e.Cid,
+		e.Status,
+		e.Description,
+		e.ReviewsLink,
+		e.Thumbnail,
+		e.Timezone,
+		e.PriceRange,
+		e.DataID,
+		e.PlaceID,
+		e.Menu.Link,
+		e.Owner.Name,
+		e.Owner.Link,
+		strings.Join(e.Emails, "; "),
+		len(e.Images),
+		len(e.UserReviews) + len(e.UserReviewsExtended),
+		websitePhones,
+		hasContactForm,
+		socialFB,
+		socialIG,
+		socialLI,
+		socialTW,
+		socialYT,
+		orgLegal,
+		orgVAT,
+		orgFound,
+		guessedEmails,
+		techAll,
+		techEcom,
+		techPay,
+		domainAge,
+		domainRegistrar,
+	}
+}
+
+// placeRowValuesForTest exposes placeRowValues for the test suite without
+// widening the exported surface. Kept in the non-test file so the helper is
+// available via Go's test-package convention.
+func placeRowValuesForTest(e *Entry) []any { return placeRowValues(e) }
 
 func writeHoursSheet(f *excelize.File, entries []*Entry) error {
 	if _, err := f.NewSheet(sheetHours); err != nil {

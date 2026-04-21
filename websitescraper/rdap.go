@@ -92,8 +92,20 @@ func LookupDomain(ctx context.Context, host string) *DomainInfo {
 	info := queryRDAP(ctx, domain)
 
 	ttl := 24 * time.Hour
-	if info == nil || info.RegistrationAt.IsZero() {
-		ttl = 30 * time.Minute
+	switch {
+	case info == nil:
+		// NXDOMAIN-style permanent failure: cache for a long time (a
+		// domain that does not resolve right now won't start resolving
+		// in the next hour).
+		ttl = 2 * time.Hour
+	case info.RegistrationAt.IsZero() && strings.HasSuffix(info.Source, " (transient)"):
+		// 429 / 5xx: retry soon so the next scrape of the same domain
+		// actually gets data.
+		ttl = 2 * time.Minute
+	case info.RegistrationAt.IsZero():
+		// Server answered but without a registration event — either the
+		// TLD does not expose it or the RDAP implementation is partial.
+		ttl = 6 * time.Hour
 	}
 
 	rdapCacheMu.Lock()
@@ -160,6 +172,14 @@ func queryRDAP(ctx context.Context, domain string) *DomainInfo {
 		return nil
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	// 429 / 5xx are transient: the domain exists, we just got rate-limited.
+	// Signal that with a sentinel so the cache uses a shorter TTL than for
+	// NXDOMAIN-style permanent failures.
+	if resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode >= 500 {
+		return &DomainInfo{Domain: domain, Source: base + " (transient)"}
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil

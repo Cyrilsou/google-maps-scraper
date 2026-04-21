@@ -114,7 +114,12 @@ func (t *TwoCaptcha) submitAndPoll(ctx context.Context, params url.Values) (stri
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
+			if !timer.Stop() {
+				// Drain the channel so the timer goroutine does not
+				// block on an unbuffered send.
+				<-timer.C
+			}
+
 			return "", ctx.Err()
 		case <-timer.C:
 		}

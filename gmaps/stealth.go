@@ -108,12 +108,91 @@ var blockedResourceTypes = map[string]struct{}{
 	"other": {},
 }
 
-// routedPages tracks pages that already have a Route handler installed,
-// so reusing a page across jobs does not pile up duplicate interceptors.
-var (
-	routedPagesMu sync.Mutex
-	routedPages   = map[playwright.Page]struct{}{}
+// pageFlags tracks per-page state that must not be re-initialised across
+// reused pages: route handlers, init scripts, warmup navigations. The map
+// is bounded via a simple LRU-style trim: when it grows past pageFlagsMax,
+// the oldest entries are evicted. Keys are playwright.Page pointers, so
+// stale entries only exist when Playwright fails to call our OnClose hook
+// (rare but possible on process kill).
+//
+// One map with bit flags is cheaper than three separate maps and makes
+// eviction consistent.
+type pageFlag uint8
+
+const (
+	flagRouted pageFlag = 1 << iota
+	flagFingerprinted
+	flagWarmed
 )
+
+const pageFlagsMax = 512 // covers WithBrowserReuseLimit(200) × small buffer
+
+var (
+	pageFlagsMu sync.Mutex
+	pageFlags   = map[playwright.Page]pageFlag{}
+	pageFlagsLRU []playwright.Page
+)
+
+func setPageFlag(p playwright.Page, flag pageFlag) bool {
+	if p == nil {
+		return false
+	}
+
+	pageFlagsMu.Lock()
+
+	current := pageFlags[p]
+	if current&flag != 0 {
+		pageFlagsMu.Unlock()
+
+		return false
+	}
+
+	firstInsert := false
+	if _, existed := pageFlags[p]; !existed {
+		// Evict oldest if the map would overflow. 1 eviction per insert
+		// is enough: we never insert in bursts.
+		if len(pageFlagsLRU) >= pageFlagsMax {
+			oldest := pageFlagsLRU[0]
+			pageFlagsLRU = pageFlagsLRU[1:]
+			delete(pageFlags, oldest)
+		}
+
+		pageFlagsLRU = append(pageFlagsLRU, p)
+		firstInsert = true
+	}
+
+	pageFlags[p] = current | flag
+	pageFlagsMu.Unlock()
+
+	// Register the cleanup outside the critical section. Playwright may
+	// invoke the OnClose handler synchronously in edge cases (e.g. page
+	// already closed), and that handler re-acquires pageFlagsMu — we
+	// would deadlock the goroutine if the lock were still held.
+	if firstInsert {
+		p.OnClose(func(_ playwright.Page) {
+			pageFlagsMu.Lock()
+			delete(pageFlags, p)
+
+			for i, entry := range pageFlagsLRU {
+				if entry == p {
+					pageFlagsLRU = append(pageFlagsLRU[:i], pageFlagsLRU[i+1:]...)
+					break
+				}
+			}
+			pageFlagsMu.Unlock()
+		})
+	}
+
+	return true
+}
+
+// pageFlagsStats is exposed for tests and /metrics; returns (tracked, lru_size).
+func pageFlagsStats() (int, int) {
+	pageFlagsMu.Lock()
+	defer pageFlagsMu.Unlock()
+
+	return len(pageFlags), len(pageFlagsLRU)
+}
 
 // InstallStealthRouting attaches a Playwright route handler that aborts
 // requests to tracker hosts and fonts. Safe to call multiple times for the
@@ -132,14 +211,9 @@ func InstallStealthRouting(page scrapemate.BrowserPage) {
 		return
 	}
 
-	routedPagesMu.Lock()
-	if _, already := routedPages[pwPage]; already {
-		routedPagesMu.Unlock()
+	if !setPageFlag(pwPage, flagRouted) {
 		return
 	}
-
-	routedPages[pwPage] = struct{}{}
-	routedPagesMu.Unlock()
 
 	_ = pwPage.Route("**/*", func(route playwright.Route) {
 		req := route.Request()
@@ -165,21 +239,6 @@ func InstallStealthRouting(page scrapemate.BrowserPage) {
 		_ = route.Continue()
 	})
 }
-
-// warmedPages remembers which pages have already hit the maps root so we do
-// not double-warmup on page reuse.
-var (
-	warmedPagesMu sync.Mutex
-	warmedPages   = map[playwright.Page]struct{}{}
-)
-
-// initScripted tracks which pages already have our fingerprint shim
-// installed. Adding the same script twice would not break anything but it
-// makes the JS console noisy.
-var (
-	initScriptedMu sync.Mutex
-	initScripted   = map[playwright.Page]struct{}{}
-)
 
 // fingerprintInitScript randomises the properties Google's fingerprinting
 // scripts probe AFTER navigator.webdriver has already been spoofed by the
@@ -290,14 +349,9 @@ func InstallFingerprintShim(page scrapemate.BrowserPage) {
 		return
 	}
 
-	initScriptedMu.Lock()
-	if _, already := initScripted[pw]; already {
-		initScriptedMu.Unlock()
+	if !setPageFlag(pw, flagFingerprinted) {
 		return
 	}
-
-	initScripted[pw] = struct{}{}
-	initScriptedMu.Unlock()
 
 	_ = pw.AddInitScript(playwright.Script{Content: playwright.String(fingerprintInitScript())})
 }
@@ -326,14 +380,9 @@ func WarmupNavigation(page scrapemate.BrowserPage) {
 		return
 	}
 
-	warmedPagesMu.Lock()
-	if _, already := warmedPages[pwPage]; already {
-		warmedPagesMu.Unlock()
+	if !setPageFlag(pwPage, flagWarmed) {
 		return
 	}
-
-	warmedPages[pwPage] = struct{}{}
-	warmedPagesMu.Unlock()
 
 	_, _ = page.Goto("https://www.google.com/maps/", scrapemate.WaitUntilDOMContentLoaded)
 	// Small idle time so the session cookies settle before the real query.
