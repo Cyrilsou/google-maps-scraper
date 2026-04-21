@@ -146,7 +146,17 @@ func New(svc *Service, addr string) (*Server, error) {
 		ans.stats(w, r)
 	})
 
-	handler := securityHeaders(mux)
+	// /metrics is Prometheus-compatible; scraped by ops tooling.
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ans.metrics(w, r)
+	})
+
+	handler := securityHeaders(apiKeyMiddleware(mux))
 	ans.srv.Handler = handler
 
 	tmplsKeys := []string{
@@ -462,7 +472,7 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 
 	// Allow the client to request a specific format, e.g. ?format=xlsx.
 	format := r.URL.Query().Get("format")
-	if format != FormatCSV && format != FormatXLSX && format != FormatJSONL {
+	if format != FormatCSV && format != FormatXLSX && format != FormatJSONL && format != FormatGeoJSON {
 		format = ""
 	}
 
@@ -490,6 +500,8 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 		// JSON Lines; use application/jsonl when widely supported, otherwise
 		// application/x-ndjson is the most accurate fallback.
 		contentType = "application/x-ndjson"
+	case strings.HasSuffix(lower, ".geojson"):
+		contentType = "application/geo+json"
 	}
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))

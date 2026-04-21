@@ -9,6 +9,7 @@ import (
 	"github.com/gosom/google-maps-scraper/gmaps"
 	"github.com/gosom/google-maps-scraper/internal/jsonbsanitize"
 	"github.com/gosom/google-maps-scraper/log"
+	"github.com/gosom/google-maps-scraper/webhook"
 	"github.com/gosom/scrapemate"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -46,6 +47,11 @@ type CentralWriter struct {
 
 	save           SaveFunc
 	OnResultsSaved func(count int)
+
+	// Webhook is optional. When set, every *gmaps.Entry passing through
+	// Run() is also streamed to it so integrations see results as they
+	// come in instead of having to poll for job completion.
+	Webhook *webhook.Client
 }
 
 // NewCentralWriter creates a new CentralWriter.
@@ -218,6 +224,7 @@ func (cw *CentralWriter) processResult(result scrapemate.Result) {
 		}
 
 		cw.AddResult(entryJobID, entry)
+		cw.streamWebhook(entryJobID, entry)
 		cw.markCompletedFromResult(result, 1)
 
 		return
@@ -227,10 +234,24 @@ func (cw *CentralWriter) processResult(result scrapemate.Result) {
 		for _, entry := range entries {
 			entry.ID = jobID
 			cw.AddResult(jobID, entry)
+			cw.streamWebhook(jobID, entry)
 		}
 
 		cw.markCompletedFromResult(result, len(entries))
 	}
+}
+
+// streamWebhook posts an individual entry to the configured webhook.
+// No-op when Webhook is nil.
+func (cw *CentralWriter) streamWebhook(jobID string, e *gmaps.Entry) {
+	if cw.Webhook == nil || e == nil {
+		return
+	}
+
+	cw.Webhook.Enqueue("gmaps.entry", map[string]any{
+		"job_id": jobID,
+		"entry":  e,
+	})
 }
 
 func (cw *CentralWriter) markCompletedFromResult(result scrapemate.Result, count int) {

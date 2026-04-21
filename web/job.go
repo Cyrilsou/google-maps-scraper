@@ -88,9 +88,10 @@ type JobData struct {
 
 // Output formats accepted by the web runner.
 const (
-	FormatCSV   = "csv"
-	FormatXLSX  = "xlsx"
-	FormatJSONL = "jsonl"
+	FormatCSV     = "csv"
+	FormatXLSX    = "xlsx"
+	FormatJSONL   = "jsonl"
+	FormatGeoJSON = "geojson"
 )
 
 // ResolvedFormat returns the output format, defaulting to CSV for backward
@@ -101,6 +102,8 @@ func (d *JobData) ResolvedFormat() string {
 		return FormatXLSX
 	case FormatJSONL, "json":
 		return FormatJSONL
+	case FormatGeoJSON:
+		return FormatGeoJSON
 	default:
 		return FormatCSV
 	}

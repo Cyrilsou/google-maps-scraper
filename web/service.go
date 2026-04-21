@@ -61,9 +61,9 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("invalid file name")
 	}
 
-	// Remove every possible artefact file (CSV, XLSX or JSONL). Missing
-	// files are fine.
-	for _, ext := range []string{".csv", ".xlsx", ".jsonl"} {
+	// Remove every possible artefact file (CSV, XLSX, JSONL, GeoJSON).
+	// Missing files are fine.
+	for _, ext := range []string{".csv", ".xlsx", ".jsonl", ".geojson"} {
 		datapath := filepath.Join(s.dataFolder, id+ext)
 		if _, err := os.Stat(datapath); err == nil {
 			if err := os.Remove(datapath); err != nil {
@@ -100,7 +100,7 @@ func (s *Service) ResultFile(id, format string) (string, error) {
 	try := []string{format}
 	if format == "" {
 		// Preference order when auto-detecting: richest export first.
-		try = []string{FormatXLSX, FormatJSONL, FormatCSV}
+		try = []string{FormatXLSX, FormatGeoJSON, FormatJSONL, FormatCSV}
 	}
 
 	for _, f := range try {

@@ -1,5 +1,6 @@
 {{range .}}
 <tr data-job-id="{{.ID}}" data-status="{{.Status}}">
+    <td><input type="checkbox" class="job-select" data-job-id="{{.ID}}" aria-label="Select job"/></td>
     <td class="mono">{{.ID}}</td>
     <td>{{.Name}}</td>
     <td>{{.Date}}</td>
@@ -20,9 +21,13 @@
                     <a href="/download?id={{.ID}}&format=csv" download>CSV</a>
                     <a href="/download?id={{.ID}}&format=xlsx" download>Excel (.xlsx)</a>
                     <a href="/download?id={{.ID}}&format=jsonl" download>JSON Lines</a>
+                    <a href="/download?id={{.ID}}&format=geojson" download>GeoJSON</a>
                 </div>
             </div>
         {{ end }}
+        <button type="button" class="button ghost"
+                onclick="window.__gmapsDuplicate && window.__gmapsDuplicate('{{.ID}}')"
+                title="Reuse this job's settings">Duplicate</button>
         <button hx-delete="/delete?id={{.ID}}"
                 hx-target="closest tr"
                 hx-swap="outerHTML"

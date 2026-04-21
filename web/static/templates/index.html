@@ -148,6 +148,7 @@
                                     <option value="csv">CSV (streaming, UTF-8 with BOM for Excel)</option>
                                     <option value="xlsx">Excel (.xlsx, multi-sheet)</option>
                                     <option value="jsonl">JSON Lines (.jsonl, for data pipelines)</option>
+                                    <option value="geojson">GeoJSON (.geojson, QGIS / Mapbox / kepler.gl)</option>
                                 </select>
                             </div>
                             <div class="form-group">
@@ -195,9 +196,15 @@
             </div>
             <div class="content">
                 <div id="spinner" class="spinner"></div>
+                <div class="bulk-toolbar" id="bulk-toolbar" style="display:none">
+                    <span id="bulk-count">0 selected</span>
+                    <button type="button" id="bulk-delete" class="delete-button">Delete selected</button>
+                    <button type="button" id="bulk-clear" class="button ghost">Clear selection</button>
+                </div>
                 <table id="job-table">
                     <thead>
                         <tr>
+                            <th style="width:36px"><input type="checkbox" id="select-all-jobs" aria-label="Select all"/></th>
                             <th>Job ID</th>
                             <th>Name</th>
                             <th>Date</th>
@@ -542,6 +549,123 @@ function hideSponsor() {
 
     // Global hook called from the job row's Preview button.
     window.__gmapsPreview = open;
+})();
+
+// -------- Duplicate job: copy settings into the form --------
+(function () {
+    window.__gmapsDuplicate = async function (jobId) {
+        try {
+            const res = await fetch('/api/v1/jobs/' + encodeURIComponent(jobId));
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const job = await res.json();
+            const d = job.Data || {};
+
+            const $ = id => document.getElementById(id);
+
+            if ($('name'))     $('name').value = (job.Name || '') + ' (copy)';
+            if ($('keywords')) $('keywords').value = (d.keywords || []).join('\n');
+            if ($('lang'))     $('lang').value = d.lang || 'en';
+            if ($('zoom'))     $('zoom').value = d.zoom || 15;
+            if ($('latitude')) $('latitude').value = d.lat || '';
+            if ($('longitude'))$('longitude').value = d.lon || '';
+            if ($('radius'))   $('radius').value = d.radius || 10000;
+            if ($('depth'))    $('depth').value = d.depth || 20;
+            if ($('fastmode')) $('fastmode').checked = !!d.fast_mode;
+            if ($('email'))    $('email').checked = !!d.email;
+            if ($('format'))   $('format').value = d.format || 'csv';
+            if ($('grid_bbox'))    $('grid_bbox').value = d.grid_bbox || '';
+            if ($('grid_cell_km')) $('grid_cell_km').value = d.grid_cell_km || 1.0;
+            if ($('maxtime'))  $('maxtime').value = humaniseDuration(d.max_time);
+            if ($('proxies'))  $('proxies').value = (d.proxies || []).join('\n');
+
+            if (window.__gmapsRefreshEstimate) window.__gmapsRefreshEstimate();
+
+            // Scroll the form into view and flash the submit.
+            document.querySelector('.sidebar').scrollTo({ top: 0, behavior: 'smooth' });
+        } catch (err) {
+            alert('Could not duplicate: ' + err.message);
+        }
+    };
+
+    // job.max_time is a Go time.Duration in nanoseconds; convert to "10m".
+    function humaniseDuration(ns) {
+        if (!ns || ns <= 0) return '10m';
+        const seconds = Math.round(ns / 1e9);
+        if (seconds % 3600 === 0) return (seconds / 3600) + 'h';
+        if (seconds % 60 === 0)   return (seconds / 60) + 'm';
+        return seconds + 's';
+    }
+})();
+
+// -------- Bulk selection + bulk delete --------
+(function () {
+    const toolbar    = document.getElementById('bulk-toolbar');
+    const countEl    = document.getElementById('bulk-count');
+    const deleteBtn  = document.getElementById('bulk-delete');
+    const clearBtn   = document.getElementById('bulk-clear');
+    const selectAll  = document.getElementById('select-all-jobs');
+
+    if (!toolbar) return;
+
+    function selected() {
+        return Array.from(document.querySelectorAll('.job-select:checked'))
+            .map(cb => cb.getAttribute('data-job-id'))
+            .filter(Boolean);
+    }
+
+    function refresh() {
+        const ids = selected();
+        countEl.textContent = ids.length + ' selected';
+        toolbar.style.display = ids.length > 0 ? 'flex' : 'none';
+
+        if (selectAll) {
+            const boxes = document.querySelectorAll('.job-select');
+            selectAll.checked = boxes.length > 0 && ids.length === boxes.length;
+            selectAll.indeterminate = ids.length > 0 && ids.length < boxes.length;
+        }
+    }
+
+    document.addEventListener('change', e => {
+        if (e.target && e.target.classList && e.target.classList.contains('job-select')) {
+            refresh();
+        }
+    });
+
+    if (selectAll) {
+        selectAll.addEventListener('change', () => {
+            document.querySelectorAll('.job-select').forEach(cb => { cb.checked = selectAll.checked; });
+            refresh();
+        });
+    }
+
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            document.querySelectorAll('.job-select').forEach(cb => { cb.checked = false; });
+            refresh();
+        });
+    }
+
+    if (deleteBtn) {
+        deleteBtn.addEventListener('click', async () => {
+            const ids = selected();
+            if (!ids.length) return;
+            if (!confirm('Delete ' + ids.length + ' job(s)? This cannot be undone.')) return;
+
+            // Serial so we get per-row DELETE responses with proper statuses.
+            for (const id of ids) {
+                try {
+                    await fetch('/delete?id=' + encodeURIComponent(id), { method: 'DELETE' });
+                    const row = document.querySelector('tr[data-job-id="' + id + '"]');
+                    if (row) row.remove();
+                } catch (_) {}
+            }
+
+            refresh();
+        });
+    }
+
+    // HTMX replaces the tbody every 10s — re-attach the select-all state.
+    document.body.addEventListener('htmx:afterSwap', refresh);
 })();
 </script>
 

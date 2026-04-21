@@ -194,6 +194,10 @@ func pageFlagsStats() (int, int) {
 	return len(pageFlags), len(pageFlagsLRU)
 }
 
+// PageFlagsStats is the public variant for consumers outside the package
+// (metrics endpoint, admin dashboard).
+func PageFlagsStats() (int, int) { return pageFlagsStats() }
+
 // InstallStealthRouting attaches a Playwright route handler that aborts
 // requests to tracker hosts and fonts. Safe to call multiple times for the
 // same page: subsequent calls are no-ops.
