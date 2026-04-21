@@ -33,7 +33,14 @@ func main() {
 		cancel()
 	}()
 
-	cfg := runner.ParseConfig()
+	cfg, err := runner.ParseConfigErr()
+	if err != nil {
+		cancel()
+		os.Stderr.WriteString("configuration error: " + err.Error() + "\n")
+
+		runner.Telemetry().Close()
+		os.Exit(2)
+	}
 
 	runnerInstance, err := runnerFactory(cfg)
 	if err != nil {

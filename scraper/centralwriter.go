@@ -26,6 +26,10 @@ type trackedJob struct {
 	riverJobID int64
 	keyword    string
 	startedAt  time.Time
+	// parentCtx is the worker's job context; Flush derives its save deadline
+	// from it so a process-wide shutdown cancels in-flight flushes instead of
+	// letting an orphaned 30s timer keep a lame-duck PG connection open.
+	parentCtx context.Context
 }
 
 // SaveFunc persists results. The default writes to PostgreSQL;
@@ -56,7 +60,16 @@ func NewCentralWriter(db *pgxpool.Pool, saveFn SaveFunc) *CentralWriter {
 
 // RegisterJob registers the active River job and returns a completion channel
 // that receives the flush result.
+//
+// Deprecated: use RegisterJobCtx so flushes can honour the River job's context.
 func (cw *CentralWriter) RegisterJob(jobID string, riverJobID int64, keyword string) <-chan FlushResult {
+	return cw.RegisterJobCtx(context.Background(), jobID, riverJobID, keyword)
+}
+
+// RegisterJobCtx is the context-aware variant of RegisterJob. ctx should be
+// the River job context; Flush uses it as the parent for its save deadline
+// so a shutdown or job cancel also cancels the DB write.
+func (cw *CentralWriter) RegisterJobCtx(ctx context.Context, jobID string, riverJobID int64, keyword string) <-chan FlushResult {
 	cw.mu.Lock()
 	defer cw.mu.Unlock()
 
@@ -67,6 +80,7 @@ func (cw *CentralWriter) RegisterJob(jobID string, riverJobID int64, keyword str
 		riverJobID: riverJobID,
 		keyword:    keyword,
 		startedAt:  time.Now(),
+		parentCtx:  ctx,
 	}
 
 	log.Debug("registered scrape job", "job_id", jobID, "river_job_id", riverJobID)
@@ -141,7 +155,14 @@ func (cw *CentralWriter) Flush(jobID string) {
 		jsonbsanitize.StripNULFromEntry(entry)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Derive the save deadline from the worker's parent context when
+	// available so a process-level cancel actually propagates to pgx.
+	parent := j.parentCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	err := cw.save(ctx, j.riverJobID, j.keyword, j.entries)
 
 	cancel()

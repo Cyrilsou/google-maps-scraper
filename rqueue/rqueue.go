@@ -69,6 +69,8 @@ const (
 type ScrapeWatchdogMetrics struct {
 	FlushWaitWarnTotal   int64
 	LongRuntimeWarnTotal int64
+	BlockedTotal         int64
+	OKTotal              int64
 }
 
 var globalScrapeWatchdog struct {
@@ -78,9 +80,13 @@ var globalScrapeWatchdog struct {
 
 // GetScrapeWatchdogMetrics returns cumulative watchdog counters for scrape jobs.
 func GetScrapeWatchdogMetrics() ScrapeWatchdogMetrics {
+	blocked, ok := gmaps.DefaultProxyStats.Totals()
+
 	return ScrapeWatchdogMetrics{
 		FlushWaitWarnTotal:   globalScrapeWatchdog.flushWaitWarnTotal.Load(),
 		LongRuntimeWarnTotal: globalScrapeWatchdog.longRuntimeWarnTotal.Load(),
+		BlockedTotal:         blocked,
+		OKTotal:              ok,
 	}
 }
 
@@ -139,6 +145,7 @@ type ScrapeManager interface {
 	JobDone()
 	SubmitJob(ctx context.Context, job scrapemate.IJob) error
 	RegisterJob(jobID string, riverJobID int64, keyword string) <-chan scraper.FlushResult
+	RegisterJobCtx(ctx context.Context, jobID string, riverJobID int64, keyword string) <-chan scraper.FlushResult
 	MarkDone(jobID string)
 	ForceFlush(jobID string)
 }
@@ -188,8 +195,9 @@ func (w *ScrapeWorker) Work(ctx context.Context, job *river.Job[ScrapeJobArgs]) 
 
 	timeout := effectiveScrapeTimeout(args.TimeoutSecs)
 
-	// Register job — CentralWriter accumulates results and flushes to DB
-	completionCh := w.Manager.RegisterJob(jobID, job.ID, args.Keyword)
+	// Register job — CentralWriter accumulates results and flushes to DB.
+	// Pass the worker ctx so the DB flush honours job cancellation.
+	completionCh := w.Manager.RegisterJobCtx(ctx, jobID, job.ID, args.Keyword)
 	flushWaitStart := time.Now()
 
 	// Create exit monitor to track job completion

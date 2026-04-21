@@ -129,8 +129,16 @@ func (m *ScraperManager) SubmitJob(ctx context.Context, job scrapemate.IJob) err
 }
 
 // RegisterJob delegates to CentralWriter.
+//
+// Deprecated: use RegisterJobCtx so the worker's context can propagate
+// cancellation to the PostgreSQL flush.
 func (m *ScraperManager) RegisterJob(jobID string, riverJobID int64, keyword string) <-chan FlushResult {
 	return m.centralWriter.RegisterJob(jobID, riverJobID, keyword)
+}
+
+// RegisterJobCtx is the context-aware variant of RegisterJob.
+func (m *ScraperManager) RegisterJobCtx(ctx context.Context, jobID string, riverJobID int64, keyword string) <-chan FlushResult {
+	return m.centralWriter.RegisterJobCtx(ctx, jobID, riverJobID, keyword)
 }
 
 // MarkDone delegates to CentralWriter.
