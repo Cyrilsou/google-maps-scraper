@@ -185,10 +185,22 @@ func (j *GmapJob) Process(ctx context.Context, resp *scrapemate.Response) (any, 
 func (j *GmapJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPage) scrapemate.Response {
 	var resp scrapemate.Response
 
+	// Block third-party trackers and fonts before the first navigation so
+	// they never leave the network queue. Idempotent on reused pages.
+	InstallStealthRouting(page)
+
 	pageResponse, err := page.Goto(j.GetFullURL(), scrapemate.WaitUntilDOMContentLoaded)
 	if err != nil {
 		resp.Error = err
 
+		return resp
+	}
+
+	// Early block detection: the /sorry/ redirect happens before our selectors
+	// even load. Failing fast here lets the framework retry on another proxy
+	// instead of wasting a scroll cycle on a CAPTCHA page.
+	if isBlockedResponse(page.URL(), nil) {
+		resp.Error = ErrBlocked
 		return resp
 	}
 
@@ -251,6 +263,11 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPag
 		return resp
 	}
 
+	if isBlockedResponse(page.URL(), []byte(body)) {
+		resp.Error = ErrBlocked
+		return resp
+	}
+
 	resp.Body = []byte(body)
 
 	return resp
@@ -304,9 +321,12 @@ func scroll(ctx context.Context,
 ) (int, error) {
 	expr := `async () => {
 		const el = document.querySelector("` + scrollSelector + `");
-		el.scrollTop = el.scrollHeight;
+		// Humanize: scroll most of the way (70-100%) instead of all at once,
+		// which avoids a perfectly-bottom jump that a real user never does.
+		const target = el.scrollTop + (el.scrollHeight - el.scrollTop) * (0.7 + Math.random() * 0.3);
+		el.scrollTop = target;
 
-		return new Promise((resolve, reject) => {
+		return new Promise((resolve) => {
   			setTimeout(() => {
     		resolve(el.scrollHeight);
   			}, %d);
@@ -317,22 +337,29 @@ func scroll(ctx context.Context,
 	// Scroll to the bottom of the page.
 	waitTime := 100.
 	cnt := 0
+	// Require two consecutive stagnant scrolls before giving up: Google Maps
+	// lazy-loads, so one idle frame does not mean the feed is exhausted.
+	stagnant := 0
 
 	const (
-		timeout  = 500
-		maxWait2 = 2000
+		minWaitMS     = 500
+		maxWaitMS     = 2000
+		stagnantLimit = 2
 	)
 
 	for i := 0; i < maxDepth; i++ {
 		cnt++
-		waitTime2 := timeout * cnt
 
-		if waitTime2 > timeout {
-			waitTime2 = maxWait2
+		// Progressive wait up to maxWaitMS, jittered to look less robotic.
+		waitMS := minWaitMS + (i * 300)
+		if waitMS > maxWaitMS {
+			waitMS = maxWaitMS
 		}
 
+		waitMS = jitterMS(waitMS)
+
 		// Scroll to the bottom of the page.
-		scrollHeight, err := page.Eval(fmt.Sprintf(expr, waitTime2))
+		scrollHeight, err := page.Eval(fmt.Sprintf(expr, waitMS))
 		if err != nil {
 			return cnt, err
 		}
@@ -349,7 +376,12 @@ func scroll(ctx context.Context,
 		}
 
 		if height == currentScrollHeight {
-			break
+			stagnant++
+			if stagnant >= stagnantLimit {
+				break
+			}
+		} else {
+			stagnant = 0
 		}
 
 		currentScrollHeight = height
@@ -362,11 +394,11 @@ func scroll(ctx context.Context,
 
 		waitTime *= 1.5
 
-		if waitTime > maxWait2 {
-			waitTime = maxWait2
+		if waitTime > maxWaitMS {
+			waitTime = maxWaitMS
 		}
 
-		page.WaitForTimeout(time.Duration(waitTime) * time.Millisecond)
+		page.WaitForTimeout(time.Duration(jitterMS(int(waitTime))) * time.Millisecond)
 	}
 
 	return cnt, nil

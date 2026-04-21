@@ -19,6 +19,7 @@ type PlaceJob struct {
 
 	UsageInResultststs      bool
 	ExtractEmail            bool
+	LangCode                string
 	ExitMonitor             exiter.Exiter
 	ExtractExtraReviews     bool
 	WriterManagedCompletion bool
@@ -44,6 +45,7 @@ func NewPlaceJob(parentID, langCode, u string, extractEmail, extraExtraReviews b
 
 	job.UsageInResultststs = true
 	job.ExtractEmail = extractEmail
+	job.LangCode = langCode
 	job.ExtractExtraReviews = extraExtraReviews
 
 	for _, opt := range opts {
@@ -146,10 +148,17 @@ func (j *PlaceJob) Process(_ context.Context, resp *scrapemate.Response) (any, [
 func (j *PlaceJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPage) scrapemate.Response {
 	var resp scrapemate.Response
 
+	InstallStealthRouting(page)
+
 	pageResponse, err := page.Goto(j.GetURL(), scrapemate.WaitUntilDOMContentLoaded)
 	if err != nil {
 		resp.Error = err
 
+		return resp
+	}
+
+	if isBlockedResponse(page.URL(), nil) {
+		resp.Error = ErrBlocked
 		return resp
 	}
 
@@ -184,6 +193,7 @@ func (j *PlaceJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPa
 				page:        page,
 				mapURL:      page.URL(),
 				reviewCount: reviewCount,
+				langCode:    j.LangCode,
 			}
 
 			// Use the new fallback mechanism that tries RPC first, then DOM

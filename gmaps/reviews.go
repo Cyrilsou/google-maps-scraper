@@ -22,6 +22,10 @@ type fetchReviewsParams struct {
 	page        scrapemate.BrowserPage
 	mapURL      string
 	reviewCount int
+	// langCode is used to build the hl= query parameter. Falls back to "en"
+	// when unset so old call sites keep working, but mixing hl=en with a
+	// non-English session looks unnatural and gets flagged faster.
+	langCode string
 }
 
 type FetchReviewsResponse struct {
@@ -76,7 +80,19 @@ func (f *fetcher) fetch(ctx context.Context) (FetchReviewsResponse, error) {
 
 	nextPageToken := extractNextPageToken(currentPageBody)
 
-	for nextPageToken != "" {
+	// Mirror the browser-side cap so a single place cannot monopolise the
+	// worker with an unbounded pagination loop.
+	const rpcPageCap = 50
+
+	for nextPageToken != "" && len(ans.pages) < rpcPageCap {
+		// Small jittered pause between pages: a human reading reviews does
+		// not fire consecutive RPC calls zero-interval apart.
+		select {
+		case <-ctx.Done():
+			return ans, ctx.Err()
+		case <-time.After(jitter(350 * time.Millisecond)):
+		}
+
 		reviewURL, err = f.generateURL(f.params.mapURL, nextPageToken, 20, requestIDForSession)
 		if err != nil {
 			log.Printf("Error generating URL for token %s: %v", nextPageToken, err)
@@ -188,33 +204,39 @@ func (f *fetcher) fetchWithBrowser(_ context.Context, initialURL, requestID stri
 	return ans, nil
 }
 
+type placeIDPattern struct {
+	src string
+	re  *regexp.Regexp
+}
+
 var (
 	patternsOnce sync.Once
-	patterns     map[string]*regexp.Regexp
+	patterns     []placeIDPattern
 )
 
 const hexMatchPattern = `0x[0-9a-fA-F]+:0x[0-9a-fA-F]+` // Hex format place ID
 
-// extractPlaceID extracts the place ID from various Google Maps URL formats
+// extractPlaceID extracts the place ID from various Google Maps URL formats.
+// Patterns are tested in a deterministic order; the first match wins.
 func extractPlaceID(mapURL string) (string, error) {
 	patternsOnce.Do(func() {
-		patterns = make(map[string]*regexp.Regexp)
-		// Try multiple patterns for extracting place ID
-		avail := []string{
-			`!1s([^!]+)`,                             // Standard format: !1s0x...
-			`place_id=([^&]+)`,                       // Query parameter format
+		// Ordered from most specific to most generic so the best match wins
+		// deterministically regardless of Go's map iteration order.
+		sources := []string{
 			`/place/[^/]+/@[^/]+/data=!.*!1s([^!]+)`, // Full place URL
+			`place_id=([^&]+)`,                       // Query parameter format
+			`!1s([^!]+)`,                             // Standard format: !1s0x...
 			hexMatchPattern,                          // Hex format place ID
 		}
 
-		patterns = make(map[string]*regexp.Regexp)
-		for _, p := range avail {
-			patterns[p] = regexp.MustCompile(p)
+		patterns = make([]placeIDPattern, 0, len(sources))
+		for _, p := range sources {
+			patterns = append(patterns, placeIDPattern{src: p, re: regexp.MustCompile(p)})
 		}
 	})
 
-	for pattern, re := range patterns {
-		match := re.FindStringSubmatch(mapURL)
+	for _, p := range patterns {
+		match := p.re.FindStringSubmatch(mapURL)
 		if len(match) >= 2 {
 			rawPlaceID, err := url.QueryUnescape(match[1])
 			if err != nil {
@@ -224,7 +246,7 @@ func extractPlaceID(mapURL string) (string, error) {
 			return rawPlaceID, nil
 		}
 		// For hex format, match[0] is the full match
-		if pattern == hexMatchPattern && len(match) >= 1 {
+		if p.src == hexMatchPattern && len(match) >= 1 {
 			return match[0], nil
 		}
 	}
@@ -251,9 +273,16 @@ func (f *fetcher) generateURL(mapURL, pageToken string, pageSize int, requestID 
 		"!12m4!1b1!2b1!4m1!1e1!11m0!13m1!1e1",
 	}
 
-	// Use English language for consistent parsing
+	// Use the job's language to stay consistent with the browser session;
+	// hl=en on a French session is a weak anti-bot signal.
+	hl := f.params.langCode
+	if hl == "" {
+		hl = "en"
+	}
+
 	fullURL := fmt.Sprintf(
-		"https://www.google.com/maps/rpc/listugcposts?authuser=0&hl=en&pb=%s",
+		"https://www.google.com/maps/rpc/listugcposts?authuser=0&hl=%s&pb=%s",
+		url.QueryEscape(hl),
 		strings.Join(pbComponents, ""),
 	)
 
@@ -271,8 +300,16 @@ func (f *fetcher) fetchReviewPage(ctx context.Context, u string) ([]byte, error)
 		return nil, fmt.Errorf("fetch error for %s: %w", u, resp.Error)
 	}
 
+	if resp.StatusCode == 429 {
+		return nil, ErrBlocked
+	}
+
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("%s: unexpected status code: %d", u, resp.StatusCode)
+	}
+
+	if isBlockedResponse(u, resp.Body) {
+		return nil, ErrBlocked
 	}
 
 	return resp.Body, nil
@@ -410,10 +447,35 @@ func extractReviewsFromPage(ctx context.Context, page scrapemate.BrowserPage) ([
 		log.Printf("Clicked reviews via: %v", clickedReviews)
 	}
 
-	// Wait for reviews panel to load
-	time.Sleep(3 * time.Second)
-
 	var reviews []DOMReview
+
+	// Wait for the reviews panel to load. A fixed 3s sleep is both slow on
+	// fast connections and insufficient when the panel takes longer. Poll
+	// the DOM with a short jittered backoff instead.
+	reviewPanelSelectors := []string{`.jftiEf`, `div[data-review-id]`, `.WMbnJf`}
+	reviewPanelReady := false
+	deadline := time.Now().Add(jitter(4 * time.Second))
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return reviews, ctx.Err()
+		default:
+		}
+
+		for _, sel := range reviewPanelSelectors {
+			if err := page.WaitForSelector(sel, 250*time.Millisecond); err == nil {
+				reviewPanelReady = true
+				break
+			}
+		}
+
+		if reviewPanelReady {
+			break
+		}
+
+		time.Sleep(jitter(300 * time.Millisecond))
+	}
 
 	maxScrollAttempts := 30
 	lastCount := 0
@@ -718,7 +780,7 @@ func extractReviewsFromPage(ctx context.Context, page scrapemate.BrowserPage) ([
 			}
 		}`)
 
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(jitter(500 * time.Millisecond))
 	}
 
 	log.Printf("DOM extraction completed: %d reviews found", len(reviews))
