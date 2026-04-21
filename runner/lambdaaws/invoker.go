@@ -35,7 +35,7 @@ func NewInvoker(cfg *runner.Config) (runner.Runner, error) {
 		"",
 	)
 
-	awscfg, err := config.LoadDefaultConfig(context.TODO(),
+	awscfg, err := config.LoadDefaultConfig(context.Background(),
 		config.WithCredentialsProvider(creds),
 		config.WithRegion(cfg.AwsRegion),
 	)
@@ -119,18 +119,7 @@ func (i *invoker) setPayloads(cfg *runner.Config) error {
 
 		// When we reach chunkSize or EOF, create a new payload
 		if len(currentChunk) >= chunkSize {
-			payload := lInput{
-				JobID:        jobID,
-				Part:         chunkNumber,
-				BucketName:   cfg.S3Bucket,
-				Keywords:     currentChunk,
-				Depth:        cfg.MaxDepth,
-				Concurrency:  cfg.Concurrency,
-				Language:     cfg.LangCode,
-				FunctionName: cfg.FunctionName,
-				ExtraReviews: cfg.ExtraReviews,
-			}
-			i.payloads = append(i.payloads, payload)
+			i.payloads = append(i.payloads, newPayload(jobID, chunkNumber, cfg, currentChunk))
 
 			currentChunk = []string{}
 			chunkNumber++
@@ -138,18 +127,7 @@ func (i *invoker) setPayloads(cfg *runner.Config) error {
 	}
 
 	if len(currentChunk) > 0 {
-		payload := lInput{
-			JobID:        jobID,
-			Part:         chunkNumber,
-			BucketName:   cfg.S3Bucket,
-			Keywords:     currentChunk,
-			Depth:        cfg.MaxDepth,
-			Concurrency:  cfg.Concurrency,
-			Language:     cfg.LangCode,
-			FunctionName: cfg.FunctionName,
-			ExtraReviews: cfg.ExtraReviews,
-		}
-		i.payloads = append(i.payloads, payload)
+		i.payloads = append(i.payloads, newPayload(jobID, chunkNumber, cfg, currentChunk))
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -161,4 +139,26 @@ func (i *invoker) setPayloads(cfg *runner.Config) error {
 	}
 
 	return nil
+}
+
+// newPayload builds a lInput from the shared config plus the current chunk.
+// Extracted so the CLI flags (-fast-mode, -geo, -zoom, -radius, -email)
+// propagate to every chunk instead of being dropped.
+func newPayload(jobID string, part int, cfg *runner.Config, keywords []string) lInput {
+	return lInput{
+		JobID:        jobID,
+		Part:         part,
+		BucketName:   cfg.S3Bucket,
+		Keywords:     keywords,
+		Depth:        cfg.MaxDepth,
+		Concurrency:  cfg.Concurrency,
+		Language:     cfg.LangCode,
+		FunctionName: cfg.FunctionName,
+		ExtraReviews: cfg.ExtraReviews,
+		FastMode:     cfg.FastMode,
+		Geo:          cfg.GeoCoordinates,
+		Zoom:         cfg.Zoom,
+		Radius:       cfg.Radius,
+		Email:        cfg.Email,
+	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/gosom/google-maps-scraper/web/sqlite"
 	"github.com/gosom/scrapemate"
 	"github.com/gosom/scrapemate/adapters/writers/csvwriter"
+	"github.com/gosom/scrapemate/adapters/writers/jsonwriter"
 	"github.com/gosom/scrapemate/scrapemateapp"
 	"golang.org/x/sync/errgroup"
 )
@@ -158,6 +159,16 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 		_ = outfile.Close()
 	}()
 
+	// Prepend a UTF-8 BOM on CSV output so Excel on Windows opens files
+	// with accented characters correctly out of the box. XLSX and JSON do
+	// not need this — XLSX is already UTF-8-signed internally, and JSON
+	// tooling all reads UTF-8.
+	if format == web.FormatCSV {
+		if _, werr := outfile.Write([]byte{0xEF, 0xBB, 0xBF}); werr != nil {
+			return werr
+		}
+	}
+
 	mate, err := w.setupMate(ctx, outfile, job)
 	if err != nil {
 		job.Status = web.StatusFailed
@@ -270,6 +281,13 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			cancel()
 
+			// Surface the specific "we got blocked by Google" error so the
+			// operator can react (rotate proxies, slow down) instead of
+			// seeing a generic scraping failure.
+			if errors.Is(err, gmaps.ErrBlocked) {
+				log.Printf("job %s hit a Google CAPTCHA / block page; consider rotating proxies", job.ID)
+			}
+
 			err2 := w.svc.Update(ctx, job)
 			if err2 != nil {
 				log.Printf("failed to update job status: %v", err2)
@@ -326,7 +344,8 @@ func (w *webrunner) setupMate(_ context.Context, writer io.Writer, job *web.Job)
 	log.Printf("job %s has proxy: %v", job.ID, hasProxy)
 
 	var writers []scrapemate.ResultWriter
-	if job.Data.ResolvedFormat() == web.FormatXLSX {
+	switch job.Data.ResolvedFormat() {
+	case web.FormatXLSX:
 		// The XLSX writer needs to close the underlying file after writing
 		// the ZIP footer, so we wrap the passed io.Writer accordingly.
 		if wc, ok := writer.(io.WriteCloser); ok {
@@ -334,7 +353,9 @@ func (w *webrunner) setupMate(_ context.Context, writer io.Writer, job *web.Job)
 		} else {
 			writers = append(writers, gmaps.NewXLSXWriter(nopCloser{writer}))
 		}
-	} else {
+	case web.FormatJSONL:
+		writers = append(writers, jsonwriter.NewJSONWriter(writer))
+	default:
 		writers = append(writers, csvwriter.NewCsvWriter(csv.NewWriter(writer)))
 	}
 

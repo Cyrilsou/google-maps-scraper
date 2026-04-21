@@ -37,9 +37,9 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("invalid file name")
 	}
 
-	// Remove both possible artefact files (a job may have been exported as
-	// either CSV or XLSX). Missing files are fine.
-	for _, ext := range []string{".csv", ".xlsx"} {
+	// Remove every possible artefact file (CSV, XLSX or JSONL). Missing
+	// files are fine.
+	for _, ext := range []string{".csv", ".xlsx", ".jsonl"} {
 		datapath := filepath.Join(s.dataFolder, id+ext)
 		if _, err := os.Stat(datapath); err == nil {
 			if err := os.Remove(datapath); err != nil {
@@ -75,7 +75,8 @@ func (s *Service) ResultFile(id, format string) (string, error) {
 
 	try := []string{format}
 	if format == "" {
-		try = []string{FormatXLSX, FormatCSV}
+		// Preference order when auto-detecting: richest export first.
+		try = []string{FormatXLSX, FormatJSONL, FormatCSV}
 	}
 
 	for _, f := range try {

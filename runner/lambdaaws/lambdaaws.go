@@ -78,15 +78,20 @@ func (l *lambdaAwsRunner) handler(ctx context.Context, input lInput) error {
 
 	exitMonitor := exiter.New()
 
+	radius := input.Radius
+	if radius <= 0 {
+		radius = 10000
+	}
+
 	seedJobs, err = runner.CreateSeedJobs(
-		false, // TODO supoort fast mode
+		input.FastMode,
 		input.Language,
 		in,
 		input.Depth,
-		false,
-		"",
-		0,
-		10000, // TODO support radius
+		input.Email,
+		input.Geo,
+		input.Zoom,
+		radius,
 		nil,
 		exitMonitor,
 		input.ExtraReviews,

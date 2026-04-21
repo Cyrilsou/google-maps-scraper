@@ -335,9 +335,12 @@ func (s *Server) scrape(w http.ResponseWriter, r *http.Request) {
 
 	newJob.Data.Email = r.Form.Get("email") == "on"
 
-	if f := r.Form.Get("format"); f == FormatXLSX {
+	switch r.Form.Get("format") {
+	case FormatXLSX:
 		newJob.Data.Format = FormatXLSX
-	} else {
+	case FormatJSONL, "json":
+		newJob.Data.Format = FormatJSONL
+	default:
 		newJob.Data.Format = FormatCSV
 	}
 
@@ -431,7 +434,7 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 
 	// Allow the client to request a specific format, e.g. ?format=xlsx.
 	format := r.URL.Query().Get("format")
-	if format != FormatCSV && format != FormatXLSX {
+	if format != FormatCSV && format != FormatXLSX && format != FormatJSONL {
 		format = ""
 	}
 
@@ -449,10 +452,16 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	fileName := filepath.Base(filePath)
-	contentType := "text/csv"
+	contentType := "text/csv; charset=utf-8"
+	lower := strings.ToLower(fileName)
 
-	if strings.HasSuffix(strings.ToLower(fileName), ".xlsx") {
+	switch {
+	case strings.HasSuffix(lower, ".xlsx"):
 		contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case strings.HasSuffix(lower, ".jsonl") || strings.HasSuffix(lower, ".json"):
+		// JSON Lines; use application/jsonl when widely supported, otherwise
+		// application/x-ndjson is the most accurate fallback.
+		contentType = "application/x-ndjson"
 	}
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))

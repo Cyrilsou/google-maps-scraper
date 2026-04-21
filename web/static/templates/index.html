@@ -123,8 +123,9 @@
                             <div class="form-group">
                                 <label for="format">Output format:</label>
                                 <select id="format" name="format">
-                                    <option value="csv">CSV (streaming, universal)</option>
+                                    <option value="csv">CSV (streaming, UTF-8 with BOM for Excel)</option>
                                     <option value="xlsx">Excel (.xlsx, multi-sheet)</option>
+                                    <option value="jsonl">JSON Lines (.jsonl, for data pipelines)</option>
                                 </select>
                             </div>
                             <div class="form-group">
@@ -229,6 +230,7 @@ function hideSponsor() {
     }).addTo(map);
 
     const drawn = new L.FeatureGroup().addTo(map);
+    const gridPreview = L.layerGroup().addTo(map);
     let pointMarker = null;
     let rect = null;
 
@@ -267,7 +269,14 @@ function hideSponsor() {
         refreshEstimate();
     }
 
+    // Maximum number of grid cells we're willing to draw as a preview. A
+    // 20 km × 20 km area at 0.5 km cells is already 1600 rectangles; the
+    // browser tolerates that. Above PREVIEW_CAP we just skip the overlay
+    // and still show the estimate — the number is the actionable info.
+    const PREVIEW_CAP = 2000;
+
     function refreshEstimate() {
+        gridPreview.clearLayers();
         if (!estimateEl) return;
         const raw = (bboxInput.value || '').trim();
         if (!raw) { estimateEl.textContent = ''; return; }
@@ -286,9 +295,33 @@ function hideSponsor() {
         const latKm = (maxLat - minLat) * kmPerDegLat;
         const avgLat = (minLat + maxLat) / 2;
         const lonKm = (maxLon - minLon) * kmPerDegLat * Math.cos(avgLat * Math.PI / 180);
-        const cells = Math.max(1, Math.ceil(latKm / cellKm) * Math.ceil(lonKm / cellKm));
+        const rows = Math.max(1, Math.ceil(latKm / cellKm));
+        const cols = Math.max(1, Math.ceil(lonKm / cellKm));
+        const cells = rows * cols;
         const minutes = Math.ceil(cells * 0.5);
-        estimateEl.textContent = `~${cells} grid cells (${latKm.toFixed(1)}×${lonKm.toFixed(1)} km), est. ${minutes} min.`;
+
+        let note = '';
+        if (cells <= PREVIEW_CAP) {
+            // Draw each cell so the user sees exactly what will be scanned.
+            const latStep = (maxLat - minLat) / rows;
+            const lonStep = (maxLon - minLon) / cols;
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const south = minLat + r * latStep;
+                    const west = minLon + c * lonStep;
+                    const north = Math.min(maxLat, south + latStep);
+                    const east = Math.min(maxLon, west + lonStep);
+                    L.rectangle(
+                        [[south, west], [north, east]],
+                        { color: '#ffa500', weight: 1, fillOpacity: 0.03, interactive: false }
+                    ).addTo(gridPreview);
+                }
+            }
+        } else {
+            note = ' — preview skipped (>2000 cells).';
+        }
+
+        estimateEl.textContent = `~${cells} grid cells (${latKm.toFixed(1)}×${lonKm.toFixed(1)} km), est. ${minutes} min${note}`;
     }
 
     map.on('click', function (e) { setPoint(e.latlng.lat, e.latlng.lng); });
@@ -311,6 +344,7 @@ function hideSponsor() {
         clearBtn.addEventListener('click', function () {
             if (pointMarker) { map.removeLayer(pointMarker); pointMarker = null; }
             setBBox(null);
+            gridPreview.clearLayers();
             latInput.value = '';
             lonInput.value = '';
         });
