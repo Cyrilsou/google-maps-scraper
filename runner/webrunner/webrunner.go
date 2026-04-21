@@ -309,7 +309,14 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 func (w *webrunner) setupMate(_ context.Context, writer io.Writer, job *web.Job) (*scrapemateapp.ScrapemateApp, error) {
 	opts := []func(*scrapemateapp.Config) error{
 		scrapemateapp.WithConcurrency(w.cfg.Concurrency),
-		scrapemateapp.WithExitOnInactivity(time.Minute * 3),
+		// Note: we deliberately do NOT set scrapemateapp.WithExitOnInactivity
+		// here. The upstream implementation initialises its lastActivityAt to
+		// the zero time (year 0001) and then tests `time.Since(lastActivityAt)
+		// > window` on every 60 s ticker — which is always true before the
+		// first job completes, so the scraper exits prematurely on slow
+		// browser launches (Windows Defender scans, first-time Playwright
+		// driver download, etc.). The real safety net is the per-job
+		// MaxTime deadline on mateCtx, which is always enforced.
 	}
 
 	if !job.Data.FastMode {
