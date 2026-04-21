@@ -94,6 +94,12 @@ func (j *EmailExtractJob) Process(ctx context.Context, resp *scrapemate.Response
 
 	j.Entry.Emails = emails
 
+	// After the quick single-page pass, trigger the richer multi-page
+	// website scraper (anti-Cloudflare, /contact + /about + legal pages,
+	// phones, social links, JSON-LD organisation). Fails silently so a
+	// broken site never blocks a scrape.
+	EnrichWebsiteContact(ctx, j.Entry)
+
 	return j.Entry, nil, nil
 }
 

@@ -311,8 +311,8 @@ go build
 | Feature | Description |
 |---------|-------------|
 | **33+ Data Points** | Business name, address, phone, website, reviews, coordinates, and more |
-| **Email Extraction** | Optional crawling of business websites for email addresses |
-| **Multiple Output Formats** | CSV, JSON, PostgreSQL, S3, LeadsDB, or custom plugins |
+| **Website Scraper** | Multi-page crawl of each business site with TLS-fingerprint stealth (azuretls) + optional FlareSolverr fallback. Extracts emails (de-obfuscates `[at]`/`[dot]`), phones, social links, schema.org organisation data, contact-form presence |
+| **Multiple Output Formats** | CSV (UTF-8 BOM), Excel (.xlsx, multi-sheet), JSON Lines, PostgreSQL, S3, LeadsDB, or custom plugins |
 | **Proxy Support** | SOCKS5, HTTP, HTTPS with authentication |
 | **Scalable Architecture** | Single machine to Kubernetes cluster |
 | **REST API** | Programmatic control for automation |
