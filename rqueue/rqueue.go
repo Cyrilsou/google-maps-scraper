@@ -177,6 +177,17 @@ func (w *ScrapeWorker) Timeout(job *river.Job[ScrapeJobArgs]) time.Duration {
 func (w *ScrapeWorker) Work(ctx context.Context, job *river.Job[ScrapeJobArgs]) error {
 	defer w.Manager.JobDone()
 
+	// If the process just hit a burst of CAPTCHA pages, sleep out the
+	// cooldown before starting. Checking here (not inside the scraper) keeps
+	// the browser warm but denies it new work, which is cheaper than
+	// retrying a blocked request and losing the whole job.
+	if paused := gmaps.DefaultAutoCooldown.Wait(ctx); paused > 0 {
+		log.Info("resumed after auto-cooldown",
+			"job_id", job.ID,
+			"paused_ms", paused.Milliseconds(),
+		)
+	}
+
 	jobStart := time.Now()
 	defer func() {
 		runtime := time.Since(jobStart)

@@ -302,6 +302,7 @@ func (f *fetcher) fetchReviewPage(ctx context.Context, u string) ([]byte, error)
 
 	if resp.StatusCode == 429 {
 		DefaultProxyStats.RecordBlock("")
+		DefaultAutoCooldown.RecordBlock()
 		return nil, ErrBlocked
 	}
 
@@ -311,6 +312,7 @@ func (f *fetcher) fetchReviewPage(ctx context.Context, u string) ([]byte, error)
 
 	if isBlockedResponse(u, resp.Body) {
 		DefaultProxyStats.RecordBlock("")
+		DefaultAutoCooldown.RecordBlock()
 		return nil, ErrBlocked
 	}
 

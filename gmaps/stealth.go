@@ -108,12 +108,91 @@ var blockedResourceTypes = map[string]struct{}{
 	"other": {},
 }
 
-// routedPages tracks pages that already have a Route handler installed,
-// so reusing a page across jobs does not pile up duplicate interceptors.
-var (
-	routedPagesMu sync.Mutex
-	routedPages   = map[playwright.Page]struct{}{}
+// pageFlags tracks per-page state that must not be re-initialised across
+// reused pages: route handlers, init scripts, warmup navigations. The map
+// is bounded via a simple LRU-style trim: when it grows past pageFlagsMax,
+// the oldest entries are evicted. Keys are playwright.Page pointers, so
+// stale entries only exist when Playwright fails to call our OnClose hook
+// (rare but possible on process kill).
+//
+// One map with bit flags is cheaper than three separate maps and makes
+// eviction consistent.
+type pageFlag uint8
+
+const (
+	flagRouted pageFlag = 1 << iota
+	flagFingerprinted
+	flagWarmed
 )
+
+const pageFlagsMax = 512 // covers WithBrowserReuseLimit(200) × small buffer
+
+var (
+	pageFlagsMu sync.Mutex
+	pageFlags   = map[playwright.Page]pageFlag{}
+	pageFlagsLRU []playwright.Page
+)
+
+func setPageFlag(p playwright.Page, flag pageFlag) bool {
+	if p == nil {
+		return false
+	}
+
+	pageFlagsMu.Lock()
+
+	current := pageFlags[p]
+	if current&flag != 0 {
+		pageFlagsMu.Unlock()
+
+		return false
+	}
+
+	firstInsert := false
+	if _, existed := pageFlags[p]; !existed {
+		// Evict oldest if the map would overflow. 1 eviction per insert
+		// is enough: we never insert in bursts.
+		if len(pageFlagsLRU) >= pageFlagsMax {
+			oldest := pageFlagsLRU[0]
+			pageFlagsLRU = pageFlagsLRU[1:]
+			delete(pageFlags, oldest)
+		}
+
+		pageFlagsLRU = append(pageFlagsLRU, p)
+		firstInsert = true
+	}
+
+	pageFlags[p] = current | flag
+	pageFlagsMu.Unlock()
+
+	// Register the cleanup outside the critical section. Playwright may
+	// invoke the OnClose handler synchronously in edge cases (e.g. page
+	// already closed), and that handler re-acquires pageFlagsMu — we
+	// would deadlock the goroutine if the lock were still held.
+	if firstInsert {
+		p.OnClose(func(_ playwright.Page) {
+			pageFlagsMu.Lock()
+			delete(pageFlags, p)
+
+			for i, entry := range pageFlagsLRU {
+				if entry == p {
+					pageFlagsLRU = append(pageFlagsLRU[:i], pageFlagsLRU[i+1:]...)
+					break
+				}
+			}
+			pageFlagsMu.Unlock()
+		})
+	}
+
+	return true
+}
+
+// pageFlagsStats is exposed for tests and /metrics; returns (tracked, lru_size).
+func pageFlagsStats() (int, int) {
+	pageFlagsMu.Lock()
+	defer pageFlagsMu.Unlock()
+
+	return len(pageFlags), len(pageFlagsLRU)
+}
 
 // InstallStealthRouting attaches a Playwright route handler that aborts
 // requests to tracker hosts and fonts. Safe to call multiple times for the
@@ -132,14 +211,9 @@ func InstallStealthRouting(page scrapemate.BrowserPage) {
 		return
 	}
 
-	routedPagesMu.Lock()
-	if _, already := routedPages[pwPage]; already {
-		routedPagesMu.Unlock()
+	if !setPageFlag(pwPage, flagRouted) {
 		return
 	}
-
-	routedPages[pwPage] = struct{}{}
-	routedPagesMu.Unlock()
 
 	_ = pwPage.Route("**/*", func(route playwright.Route) {
 		req := route.Request()
@@ -166,12 +240,121 @@ func InstallStealthRouting(page scrapemate.BrowserPage) {
 	})
 }
 
-// warmedPages remembers which pages have already hit the maps root so we do
-// not double-warmup on page reuse.
-var (
-	warmedPagesMu sync.Mutex
-	warmedPages   = map[playwright.Page]struct{}{}
-)
+// fingerprintInitScript randomises the properties Google's fingerprinting
+// scripts probe AFTER navigator.webdriver has already been spoofed by the
+// stealth adapter. Each new page reuse cycle gets a fresh roll so the
+// same IP does not always look like the same hardware.
+//
+// Values picked from the distribution of real Chrome installs on desktop.
+// We avoid extremes (e.g. hardwareConcurrency=2 on a Windows laptop is now
+// rare and looks like a VM).
+func fingerprintInitScript() string {
+	cores := []int{4, 6, 8, 8, 8, 12, 16}  // weighted toward 8
+	memory := []int{4, 8, 8, 8, 16, 16, 32}
+	timezones := []string{
+		"Europe/Paris", "Europe/Berlin", "Europe/London", "Europe/Madrid",
+		"Europe/Amsterdam", "America/New_York", "America/Chicago",
+		"America/Los_Angeles",
+	}
+	widths := []int{1280, 1366, 1440, 1536, 1600, 1680, 1920, 2560}
+	heights := map[int]int{
+		1280: 720, 1366: 768, 1440: 900, 1536: 864,
+		1600: 900, 1680: 1050, 1920: 1080, 2560: 1440,
+	}
+
+	c := cores[rand.IntN(len(cores))]
+	m := memory[rand.IntN(len(memory))]
+	tz := timezones[rand.IntN(len(timezones))]
+	w := widths[rand.IntN(len(widths))]
+	h := heights[w]
+
+	// NB: we override the *value* returned; the property remains
+	// configurable so Google's own code that writes to navigator still
+	// works. `value` + `configurable:true` matches how puppeteer-stealth
+	// does it.
+	return `(() => {
+		try {
+			Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ` + itoa(c) + `, configurable: true });
+			Object.defineProperty(navigator, 'deviceMemory',       { get: () => ` + itoa(m) + `, configurable: true });
+			Object.defineProperty(screen,    'width',              { get: () => ` + itoa(w) + `, configurable: true });
+			Object.defineProperty(screen,    'height',             { get: () => ` + itoa(h) + `, configurable: true });
+			Object.defineProperty(screen,    'availWidth',         { get: () => ` + itoa(w) + `, configurable: true });
+			Object.defineProperty(screen,    'availHeight',        { get: () => ` + itoa(h-40) + `, configurable: true });
+
+			// Override Intl.DateTimeFormat().resolvedOptions().timeZone so
+			// the timezone probe returns a consistent answer.
+			const origResolved = Intl.DateTimeFormat.prototype.resolvedOptions;
+			Intl.DateTimeFormat.prototype.resolvedOptions = function () {
+				const r = origResolved.call(this);
+				r.timeZone = '` + tz + `';
+				return r;
+			};
+
+			// webdriver is already false via stealth adapter, but double-pin.
+			Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+
+			// Some sites probe permissions.query({name:'notifications'})
+			// and flag "prompt" as suspicious; normalise to "default".
+			const origQuery = navigator.permissions && navigator.permissions.query;
+			if (origQuery) {
+				navigator.permissions.query = (params) => {
+					if (params && params.name === 'notifications') {
+						return Promise.resolve({ state: Notification.permission || 'default' });
+					}
+					return origQuery.call(navigator.permissions, params);
+				};
+			}
+		} catch (e) { /* ignored - never break the page */ }
+	})();`
+}
+
+func itoa(n int) string {
+	// Minimal inline conversion to avoid pulling strconv into stealth.
+	if n == 0 {
+		return "0"
+	}
+
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+
+	var buf [20]byte
+	i := len(buf)
+
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+
+	return string(buf[i:])
+}
+
+// InstallFingerprintShim registers fingerprintInitScript() on page so it
+// runs on every navigation. Best-effort: no-op if AddInitScript is not
+// available from the underlying driver.
+func InstallFingerprintShim(page scrapemate.BrowserPage) {
+	if page == nil {
+		return
+	}
+
+	pw, ok := page.Unwrap().(playwright.Page)
+	if !ok || pw == nil {
+		return
+	}
+
+	if !setPageFlag(pw, flagFingerprinted) {
+		return
+	}
+
+	_ = pw.AddInitScript(playwright.Script{Content: playwright.String(fingerprintInitScript())})
+}
 
 // WarmupNavigation visits https://www.google.com/maps/ before the first
 // deep URL is loaded on this page. A user never navigates straight to a
@@ -197,14 +380,9 @@ func WarmupNavigation(page scrapemate.BrowserPage) {
 		return
 	}
 
-	warmedPagesMu.Lock()
-	if _, already := warmedPages[pwPage]; already {
-		warmedPagesMu.Unlock()
+	if !setPageFlag(pwPage, flagWarmed) {
 		return
 	}
-
-	warmedPages[pwPage] = struct{}{}
-	warmedPagesMu.Unlock()
 
 	_, _ = page.Goto("https://www.google.com/maps/", scrapemate.WaitUntilDOMContentLoaded)
 	// Small idle time so the session cookies settle before the real query.

@@ -189,6 +189,10 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPag
 	// they never leave the network queue. Idempotent on reused pages.
 	InstallStealthRouting(page)
 
+	// Randomise navigator/screen properties before the first nav; idempotent
+	// on reused pages.
+	InstallFingerprintShim(page)
+
 	// Hit google.com/maps first so we have a plausible referer chain. No-op
 	// on subsequent jobs that reuse the same page.
 	WarmupNavigation(page)
@@ -205,6 +209,7 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPag
 	// instead of wasting a scroll cycle on a CAPTCHA page.
 	if isBlockedResponse(page.URL(), nil) {
 		DefaultProxyStats.RecordBlock("")
+		DefaultAutoCooldown.RecordBlock()
 		resp.Error = ErrBlocked
 		return resp
 	}
@@ -270,6 +275,7 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPag
 
 	if isBlockedResponse(page.URL(), []byte(body)) {
 		DefaultProxyStats.RecordBlock("")
+		DefaultAutoCooldown.RecordBlock()
 		resp.Error = ErrBlocked
 		return resp
 	}

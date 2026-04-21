@@ -143,6 +143,11 @@ func (f *Fetcher) doAzure(ctx context.Context, rawURL string) (*Response, error)
 
 	s := f.session
 
+	// Propagate cancellation INTO azuretls so Do aborts instead of blocking
+	// us in a detached goroutine. The Fetcher mutex guarantees no concurrent
+	// Do() call on the same session, so SetContext is safe here.
+	s.SetContext(reqCtx)
+
 	req := &tls_client.Request{
 		Method: "GET",
 		Url:    rawURL,
@@ -158,19 +163,28 @@ func (f *Fetcher) doAzure(ctx context.Context, rawURL string) (*Response, error)
 		},
 	}
 
-	done := make(chan struct{})
-	var (
+	// We still need the goroutine-as-watchdog pattern because s.Do does not
+	// always honour ctx fast-enough on TLS handshake failures. But now that
+	// we've SetContext'd the session, the goroutine will unwind on its own
+	// within the timeout instead of leaking until some later GC event.
+	type azResult struct {
 		resp *tls_client.Response
 		err  error
-	)
+	}
+
+	done := make(chan azResult, 1)
 
 	go func() {
-		defer close(done)
-		resp, err = s.Do(req)
+		r, e := s.Do(req)
+		done <- azResult{resp: r, err: e}
 	}()
 
+	var resp *tls_client.Response
+	var err error
+
 	select {
-	case <-done:
+	case r := <-done:
+		resp, err = r.resp, r.err
 	case <-reqCtx.Done():
 		return nil, reqCtx.Err()
 	}

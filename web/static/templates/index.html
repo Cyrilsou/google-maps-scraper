@@ -14,12 +14,16 @@
             integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
             crossorigin=""></script>
     <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
-    <style>
-        #map { height: 320px; width: 100%; margin-bottom: 10px; border: 1px solid #ccc; }
-        .map-toolbar { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
-        .map-toolbar input { flex: 1 1 180px; }
-        .map-estimate { font-size: 12px; color: #555; margin-top: 4px; min-height: 1.2em; }
-    </style>
+    <script>
+      // Restore dark-mode preference before paint so the user never flashes white.
+      (function () {
+        try {
+          if (localStorage.getItem('gmaps.theme') === 'dark') {
+            document.documentElement.setAttribute('data-theme', 'dark');
+          }
+        } catch (_) {}
+      })();
+    </script>
 </head>
 <body>
     <div class="app-container">
@@ -28,6 +32,19 @@
             <nav>
                 <a href="/api/docs" target="_blank" rel="noopener noreferrer">API Documentation</a>
             </nav>
+            <div class="header-spacer"></div>
+            <div class="header-stats" id="header-stats">
+                <span class="stat-pill ok"><span>OK</span><strong id="stat-ok">0</strong></span>
+                <span class="stat-pill alert" style="display:none" id="stat-blocks-pill">
+                    <span>Blocks</span><strong id="stat-blocks">0</strong>
+                </span>
+                <span class="stat-pill" id="stat-cooldown" style="display:none">
+                    <span>Cooldown</span><strong id="stat-cooldown-remaining">0s</strong>
+                </span>
+            </div>
+            <button type="button" class="ghost" id="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode">
+                <span id="theme-toggle-icon">🌙</span>
+            </button>
             <div class="github-section">
                 <p>If you find this tool useful, please consider starring our repository: </p>
                 <a href="https://github.com/gosom/google-maps-scraper" class="github-button">
@@ -65,13 +82,18 @@
                     
                     <fieldset>
                         <legend>Job Details</legend>
+                        <div class="presets">
+                            <button type="button" data-preset="default">Default</button>
+                            <button type="button" data-preset="fast">Fast (beta)</button>
+                            <button type="button" data-preset="deep">🔎 Deep Search</button>
+                        </div>
                         <div class="form-group">
                             <label for="name">Job Name:</label>
                             <input type="text" id="name" name="name" value="{{.Name}}">
                         </div>
                         <div class="form-group">
                             <label for="keywords">Keywords:</label>
-                            <textarea id="keywords" name="keywords" rows="10">{{ .KeywordsString }}</textarea>
+                            <textarea id="keywords" name="keywords" rows="8">{{ .KeywordsString }}</textarea>
                         </div>
                         <div class="form-group">
                             <label for="lang">Language:</label>
@@ -166,7 +188,9 @@
                         </fieldset>
                     </details>
                     
-                    <button type="submit">Start Scraping</button>
+                    <div class="primary-action">
+                        <button type="submit">Start scraping</button>
+                    </div>
                 </form>
             </div>
             <div class="content">
@@ -175,9 +199,10 @@
                     <thead>
                         <tr>
                             <th>Job ID</th>
-                            <th>Job Name</th>
-                            <th>Job Date</th>
+                            <th>Name</th>
+                            <th>Date</th>
                             <th>Status</th>
+                            <th class="num">Results</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -189,6 +214,66 @@
         </main>
     </div>
 
+    <!-- Preview modal -->
+    <div id="preview-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+        <div class="modal-header">
+          <h2 id="preview-title">Results preview</h2>
+          <span class="muted" id="preview-subtitle"></span>
+          <div class="header-spacer"></div>
+          <div class="presets" style="margin:0">
+            <button type="button" id="preview-tab-table" class="ghost">Table</button>
+            <button type="button" id="preview-tab-map" class="ghost">Map</button>
+          </div>
+          <button type="button" class="modal-close" aria-label="Close">&times;</button>
+        </div>
+
+        <div class="modal-header" style="padding-top:0; border-bottom:none">
+          <input type="text" id="preview-filter" placeholder="Filter by name, address, category, website…" style="flex:1 1 320px" />
+          <label class="text-muted" style="display:flex;gap:6px;align-items:center">
+            <input type="checkbox" id="preview-only-email"/> Only w/ email
+          </label>
+          <label class="text-muted" style="display:flex;gap:6px;align-items:center">
+            Min rating
+            <input type="number" id="preview-min-rating" value="0" min="0" max="5" step="0.1" style="width:72px"/>
+          </label>
+          <span class="muted" id="preview-count"></span>
+        </div>
+
+        <div class="modal-body">
+          <div id="preview-table-wrapper">
+            <table id="preview-table">
+              <thead>
+                <tr>
+                  <th>Title</th>
+                  <th>Category</th>
+                  <th>Address</th>
+                  <th>Phone</th>
+                  <th>Website</th>
+                  <th class="num">Rating</th>
+                  <th class="num">Reviews</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="preview-rows"></tbody>
+            </table>
+          </div>
+          <div id="preview-map-wrapper" style="display:none">
+            <div id="preview-map" style="height:60vh; width:100%;"></div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <span id="preview-total"></span>
+          <span>
+            <a id="preview-download-csv"  href="#" download>CSV</a> ·
+            <a id="preview-download-xlsx" href="#" download>Excel</a> ·
+            <a id="preview-download-jsonl" href="#" download>JSONL</a>
+          </span>
+        </div>
+      </div>
+    </div>
+
 <script>
 function hideSponsor() {
     const sponsorSection = document.getElementById('sponsor-section');
@@ -196,6 +281,268 @@ function hideSponsor() {
         sponsorSection.style.display = 'none';
     }
 }
+
+// -------- Dark mode toggle --------
+(function () {
+    const btn = document.getElementById('theme-toggle');
+    const icon = document.getElementById('theme-toggle-icon');
+    if (!btn) return;
+
+    function apply(mode) {
+        if (mode === 'dark') {
+            document.documentElement.setAttribute('data-theme', 'dark');
+            if (icon) icon.textContent = '☀️';
+        } else {
+            document.documentElement.removeAttribute('data-theme');
+            if (icon) icon.textContent = '🌙';
+        }
+    }
+
+    // sync icon with whatever the pre-paint script decided.
+    apply(document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light');
+
+    btn.addEventListener('click', function () {
+        const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        try { localStorage.setItem('gmaps.theme', next); } catch (_) {}
+        apply(next);
+    });
+})();
+
+// -------- Presets --------
+(function () {
+    document.querySelectorAll('[data-preset]').forEach(btn => {
+        btn.addEventListener('click', function () {
+            const preset = btn.getAttribute('data-preset');
+            const $ = id => document.getElementById(id);
+
+            switch (preset) {
+                case 'default':
+                    $('depth').value = 20;
+                    $('fastmode').checked = false;
+                    $('email').checked = false;
+                    $('format').value = 'csv';
+                    $('grid_cell_km').value = '1.0';
+                    break;
+                case 'fast':
+                    $('depth').value = 10;
+                    $('fastmode').checked = true;
+                    $('email').checked = false;
+                    $('format').value = 'csv';
+                    break;
+                case 'deep':
+                    // Deep search: maximum coverage + enrichment.
+                    $('depth').value = 40;
+                    $('fastmode').checked = false;
+                    $('email').checked = true;
+                    $('format').value = 'xlsx';
+                    $('grid_cell_km').value = '0.5';
+                    // If a bbox is already drawn, the grid-cell change above
+                    // will re-render the preview automatically.
+                    if (typeof window.__gmapsRefreshEstimate === 'function') {
+                        window.__gmapsRefreshEstimate();
+                    }
+                    break;
+            }
+        });
+    });
+})();
+
+// -------- Stats poller (blocks/OK counters + cooldown state) --------
+(function () {
+    const okEl       = document.getElementById('stat-ok');
+    const blocksEl   = document.getElementById('stat-blocks');
+    const blocksPill = document.getElementById('stat-blocks-pill');
+    const coolEl     = document.getElementById('stat-cooldown');
+    const coolRemEl  = document.getElementById('stat-cooldown-remaining');
+
+    if (!okEl) return;
+
+    async function poll() {
+        try {
+            const res = await fetch('/api/v1/stats');
+            if (!res.ok) return;
+            const d = await res.json();
+            okEl.textContent = d.ok || 0;
+            blocksEl.textContent = d.blocks || 0;
+            blocksPill.style.display = (d.blocks && d.blocks > 0) ? '' : 'none';
+            // cooldown field is not part of /stats yet — leave hidden.
+        } catch (_) {}
+    }
+
+    poll();
+    setInterval(poll, 8000);
+})();
+
+// -------- Preview modal: table + filter + map --------
+(function () {
+    const modal = document.getElementById('preview-modal');
+    if (!modal) return;
+
+    const rowsEl       = document.getElementById('preview-rows');
+    const filterEl     = document.getElementById('preview-filter');
+    const onlyEmailEl  = document.getElementById('preview-only-email');
+    const minRatingEl  = document.getElementById('preview-min-rating');
+    const countEl      = document.getElementById('preview-count');
+    const totalEl      = document.getElementById('preview-total');
+    const subtitle     = document.getElementById('preview-subtitle');
+    const closeBtn     = modal.querySelector('.modal-close');
+    const tabTable     = document.getElementById('preview-tab-table');
+    const tabMap       = document.getElementById('preview-tab-map');
+    const tableWrapper = document.getElementById('preview-table-wrapper');
+    const mapWrapper   = document.getElementById('preview-map-wrapper');
+
+    let previewData = [];
+    let currentJobId = null;
+    let previewMap = null;
+    let previewMarkers = null;
+
+    function open(jobId, jobName) {
+        currentJobId = jobId;
+        subtitle.textContent = jobName ? `— ${jobName}` : '';
+        rowsEl.innerHTML = '<tr><td colspan="8" class="text-muted" style="padding:20px;text-align:center">Loading…</td></tr>';
+        modal.classList.add('open');
+        modal.setAttribute('aria-hidden', 'false');
+        filterEl.value = '';
+        onlyEmailEl.checked = false;
+        minRatingEl.value = '0';
+
+        // Download links (always available).
+        document.getElementById('preview-download-csv').href  = `/download?id=${encodeURIComponent(jobId)}&format=csv`;
+        document.getElementById('preview-download-xlsx').href = `/download?id=${encodeURIComponent(jobId)}&format=xlsx`;
+        document.getElementById('preview-download-jsonl').href = `/download?id=${encodeURIComponent(jobId)}&format=jsonl`;
+
+        fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/preview?limit=500`)
+            .then(r => r.ok ? r.json() : Promise.reject(r.status))
+            .then(d => {
+                previewData = d.results || [];
+                totalEl.textContent = d.meta && d.meta.total_count
+                    ? `${d.meta.total_count} total row(s) — showing up to ${previewData.length}.`
+                    : `${previewData.length} row(s).`;
+                render();
+                showTab('table');
+            })
+            .catch(err => {
+                rowsEl.innerHTML = `<tr><td colspan="8" class="text-muted" style="padding:20px;text-align:center">Preview unavailable (${err}). Use the Download button above.</td></tr>`;
+            });
+    }
+
+    function close() {
+        modal.classList.remove('open');
+        modal.setAttribute('aria-hidden', 'true');
+        previewData = [];
+        currentJobId = null;
+    }
+
+    function render() {
+        const needle = (filterEl.value || '').toLowerCase().trim();
+        const onlyEmail = onlyEmailEl.checked;
+        const minRating = parseFloat(minRatingEl.value) || 0;
+
+        const filtered = previewData.filter(r => {
+            if (onlyEmail && !r.email && !(r.website && r.website.includes('mailto:'))) {
+                // The /preview schema doesn't expose emails directly; fall
+                // back to "has website" as a soft proxy.
+                if (!r.website) return false;
+            }
+            if (minRating > 0 && (r.rating || 0) < minRating) return false;
+            if (!needle) return true;
+            const hay = [r.title, r.category, r.address, r.website, r.phone].join(' ').toLowerCase();
+            return hay.indexOf(needle) !== -1;
+        });
+
+        countEl.textContent = filtered.length === previewData.length
+            ? ''
+            : `${filtered.length} / ${previewData.length} match filter.`;
+
+        if (filtered.length === 0) {
+            rowsEl.innerHTML = '<tr><td colspan="8" class="text-muted" style="padding:20px;text-align:center">No rows match.</td></tr>';
+            return;
+        }
+
+        const escape = s => (s || '').toString()
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const link = (href, text) => href
+            ? `<a href="${escape(href)}" target="_blank" rel="noopener" class="result-link">${escape(text || href)}</a>`
+            : '<span class="empty-cell">—</span>';
+        const ratingCell = r => r.rating
+            ? `<span class="rating">★ ${r.rating.toFixed(1)}</span>`
+            : '<span class="empty-cell">—</span>';
+
+        rowsEl.innerHTML = filtered.map(r => `
+            <tr>
+                <td>${escape(r.title)}</td>
+                <td>${escape(r.category) || '<span class="empty-cell">—</span>'}</td>
+                <td>${escape(r.address) || '<span class="empty-cell">—</span>'}</td>
+                <td>${escape(r.phone) || '<span class="empty-cell">—</span>'}</td>
+                <td>${link(r.website, shortHost(r.website))}</td>
+                <td class="num">${ratingCell(r)}</td>
+                <td class="num">${r.reviews || 0}</td>
+                <td>${link(r.link, 'Maps')}</td>
+            </tr>
+        `).join('');
+    }
+
+    function shortHost(u) {
+        if (!u) return '';
+        try { return new URL(u).host.replace(/^www\./, ''); }
+        catch (_) { return u; }
+    }
+
+    function showTab(name) {
+        if (name === 'map') {
+            tableWrapper.style.display = 'none';
+            mapWrapper.style.display = '';
+            renderMap();
+        } else {
+            tableWrapper.style.display = '';
+            mapWrapper.style.display = 'none';
+        }
+    }
+
+    function renderMap() {
+        if (!previewMap) {
+            previewMap = L.map('preview-map');
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors', maxZoom: 19
+            }).addTo(previewMap);
+        }
+
+        if (previewMarkers) { previewMap.removeLayer(previewMarkers); }
+        previewMarkers = L.layerGroup().addTo(previewMap);
+
+        const bounds = [];
+        previewData.forEach(r => {
+            if (!r.lat || !r.lon) return;
+            const marker = L.marker([r.lat, r.lon]);
+            const popup = `<strong>${(r.title || '').replace(/</g, '&lt;')}</strong><br>
+                ${(r.address || '')}<br>
+                ${r.rating ? '★ ' + r.rating.toFixed(1) + ' ' : ''}${r.reviews ? '(' + r.reviews + ')' : ''}<br>
+                ${r.website ? '<a href="' + r.website + '" target="_blank">' + shortHost(r.website) + '</a>' : ''}`;
+            marker.bindPopup(popup);
+            previewMarkers.addLayer(marker);
+            bounds.push([r.lat, r.lon]);
+        });
+
+        if (bounds.length) {
+            previewMap.fitBounds(bounds, { padding: [30, 30] });
+        } else {
+            previewMap.setView([0, 0], 2);
+        }
+
+        // Leaflet needs a nudge when its container was display:none at init.
+        setTimeout(() => previewMap.invalidateSize(), 100);
+    }
+
+    [filterEl, onlyEmailEl, minRatingEl].forEach(el => el.addEventListener('input', render));
+    tabTable.addEventListener('click', () => showTab('table'));
+    tabMap.addEventListener('click', () => showTab('map'));
+    closeBtn.addEventListener('click', close);
+    modal.addEventListener('click', e => { if (e.target === modal) close(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && modal.classList.contains('open')) close(); });
+
+    // Global hook called from the job row's Preview button.
+    window.__gmapsPreview = open;
+})();
 </script>
 
 <script>
@@ -339,6 +686,10 @@ function hideSponsor() {
 
     if (cellInput) { cellInput.addEventListener('input', refreshEstimate); }
     if (bboxInput) { bboxInput.addEventListener('input', refreshEstimate); }
+
+    // Expose for the Deep Search preset button so it can re-render the
+    // estimate after programmatically changing the cell size.
+    window.__gmapsRefreshEstimate = refreshEstimate;
 
     if (clearBtn) {
         clearBtn.addEventListener('click', function () {

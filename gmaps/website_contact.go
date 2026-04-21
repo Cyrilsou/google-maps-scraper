@@ -2,6 +2,7 @@ package gmaps
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -71,14 +72,21 @@ func EnrichWebsiteContact(ctx context.Context, e *Entry) {
 		return
 	}
 
+	// MX-filter everything we found before we commit to the export. An email
+	// whose domain has no MX is almost always a false positive (image asset
+	// we misparsed, WordPress placeholder, developer sample).
+	if len(profile.Emails) > 0 {
+		profile.Emails = websitescraper.ValidateEmails(cctx, profile.Emails)
+	}
+
 	if len(profile.Emails) > 0 {
 		// Union: keep any Maps-derived emails first (usually the official
 		// business address), then add anything the crawl discovered.
 		seen := map[string]bool{}
 		merged := []string{}
 
-		for _, e := range e.Emails {
-			s := strings.ToLower(strings.TrimSpace(e))
+		for _, em := range e.Emails {
+			s := strings.ToLower(strings.TrimSpace(em))
 			if s == "" || seen[s] {
 				continue
 			}
@@ -87,17 +95,83 @@ func EnrichWebsiteContact(ctx context.Context, e *Entry) {
 			merged = append(merged, s)
 		}
 
-		for _, e := range profile.Emails {
-			if !seen[e] {
-				seen[e] = true
-				merged = append(merged, e)
+		for _, em := range profile.Emails {
+			if !seen[em] {
+				seen[em] = true
+				merged = append(merged, em)
 			}
 		}
 
 		e.Emails = merged
 	}
 
-	e.WebsiteContact = contactFromProfile(profile)
+	contact := contactFromProfile(profile)
+
+	// Tech stack: run the signatures over the landing page body. We do not
+	// store per-page bodies on the profile, so we refetch the landing here;
+	// it is almost always cached in the Fetcher's session.
+	if techs := detectTech(cctx, rawURL); len(techs) > 0 {
+		contact.TechStack = techs
+	}
+
+	// Guess canonical emails when we have a person's name but no direct
+	// address. Avoids emitting garbage: each guess is MX-validated before
+	// being exported.
+	if len(e.Emails) == 0 && profile.Organization != nil && profile.Organization.Name != "" {
+		if host := hostFromURL(rawURL); host != "" {
+			guesses := websitescraper.GuessEmails(cctx, profile.Organization.Name, host)
+			contact.GuessedEmails = guesses
+		}
+	}
+
+	// Domain age + registrar via RDAP (24 h cache).
+	if host := hostFromURL(rawURL); host != "" {
+		if info := websitescraper.LookupDomain(cctx, host); info != nil && info.AgeYears > 0 {
+			contact.DomainAgeYears = info.AgeYears
+			contact.DomainRegistrar = info.Registrar
+		}
+	}
+
+	e.WebsiteContact = contact
+}
+
+func hostFromURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+
+	return strings.TrimPrefix(u.Host, "www.")
+}
+
+// detectTech re-fetches the landing page (cheap: cached TLS session) and
+// runs the signatures. Returns nil on any error.
+func detectTech(ctx context.Context, rawURL string) []TechItem {
+	resp, err := getWebsiteFetcher().Get(ctx, rawURL)
+	if err != nil || resp == nil {
+		return nil
+	}
+
+	techs := websitescraper.DetectTech(resp.Body, resp.Headers)
+	if len(techs) == 0 {
+		return nil
+	}
+
+	out := make([]TechItem, 0, len(techs))
+	for _, t := range techs {
+		out = append(out, TechItem{Name: t.Name, Category: t.Category, Version: t.Version})
+	}
+
+	return out
 }
 
 func contactFromProfile(p *websitescraper.ContactProfile) *WebsiteContact {
