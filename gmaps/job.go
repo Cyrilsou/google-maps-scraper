@@ -189,6 +189,10 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPag
 	// they never leave the network queue. Idempotent on reused pages.
 	InstallStealthRouting(page)
 
+	// Hit google.com/maps first so we have a plausible referer chain. No-op
+	// on subsequent jobs that reuse the same page.
+	WarmupNavigation(page)
+
 	pageResponse, err := page.Goto(j.GetFullURL(), scrapemate.WaitUntilDOMContentLoaded)
 	if err != nil {
 		resp.Error = err
@@ -200,6 +204,7 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPag
 	// even load. Failing fast here lets the framework retry on another proxy
 	// instead of wasting a scroll cycle on a CAPTCHA page.
 	if isBlockedResponse(page.URL(), nil) {
+		DefaultProxyStats.RecordBlock("")
 		resp.Error = ErrBlocked
 		return resp
 	}
@@ -264,9 +269,12 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPag
 	}
 
 	if isBlockedResponse(page.URL(), []byte(body)) {
+		DefaultProxyStats.RecordBlock("")
 		resp.Error = ErrBlocked
 		return resp
 	}
+
+	DefaultProxyStats.RecordOK("")
 
 	resp.Body = []byte(body)
 
@@ -321,9 +329,22 @@ func scroll(ctx context.Context,
 ) (int, error) {
 	expr := `async () => {
 		const el = document.querySelector("` + scrollSelector + `");
-		// Humanize: scroll most of the way (70-100%) instead of all at once,
-		// which avoids a perfectly-bottom jump that a real user never does.
-		const target = el.scrollTop + (el.scrollHeight - el.scrollTop) * (0.7 + Math.random() * 0.3);
+		// Humanise: most scrolls advance 70-100% of the remaining height,
+		// but every few iterations we either overshoot slightly (going
+		// past the bottom, clamped by the browser) or scroll UP a bit
+		// to simulate a user who double-checks a place. A real user
+		// never reaches the bottom in identical, monotonic jumps.
+		const r = Math.random();
+		let target;
+		if (r < 0.08) {
+			// 8%: nudge upwards 5-15%
+			target = Math.max(0, el.scrollTop - el.clientHeight * (0.05 + Math.random() * 0.10));
+		} else if (r < 0.18) {
+			// 10%: big jump (overshoot)
+			target = el.scrollTop + (el.scrollHeight - el.scrollTop) * (1.1 + Math.random() * 0.3);
+		} else {
+			target = el.scrollTop + (el.scrollHeight - el.scrollTop) * (0.7 + Math.random() * 0.3);
+		}
 		el.scrollTop = target;
 
 		return new Promise((resolve) => {
