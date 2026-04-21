@@ -74,6 +74,17 @@ var mainHeaders = []string{
 	"tech_payments",
 	"domain_age_years",
 	"domain_registrar",
+	// Instagram profile (populated when a website link to Instagram exists).
+	"ig_handle",
+	"ig_full_name",
+	"ig_bio",
+	"ig_followers",
+	"ig_following",
+	"ig_posts",
+	"ig_is_verified",
+	"ig_is_business",
+	"ig_category",
+	"ig_external_url",
 }
 
 // WriteXLSX streams entries into an XLSX workbook and writes the result to w.
@@ -167,6 +178,9 @@ func placeRowValues(e *Entry) []any {
 		orgLegal, orgVAT, orgFound                                      string
 		guessedEmails, techAll, techEcom, techPay, domainRegistrar      string
 		domainAge                                                       int
+		igHandle, igFullName, igBio, igCategory, igExternalURL          string
+		igFollowers, igFollowing, igPosts                               int
+		igIsVerified, igIsBusiness                                      bool
 	)
 
 	if wc := e.WebsiteContact; wc != nil {
@@ -202,6 +216,19 @@ func placeRowValues(e *Entry) []any {
 		techAll = strings.Join(allNames, "; ")
 		techEcom = strings.Join(ecomNames, "; ")
 		techPay = strings.Join(payNames, "; ")
+
+		if ig := wc.Instagram; ig != nil {
+			igHandle = ig.Handle
+			igFullName = ig.FullName
+			igBio = ig.Bio
+			igCategory = ig.Category
+			igExternalURL = ig.ExternalURL
+			igFollowers = ig.FollowerCount
+			igFollowing = ig.FollowingCount
+			igPosts = ig.PostCount
+			igIsVerified = ig.IsVerified
+			igIsBusiness = ig.IsBusiness
+		}
 	}
 
 	return []any{
@@ -254,6 +281,16 @@ func placeRowValues(e *Entry) []any {
 		techPay,
 		domainAge,
 		domainRegistrar,
+		igHandle,
+		igFullName,
+		igBio,
+		igFollowers,
+		igFollowing,
+		igPosts,
+		igIsVerified,
+		igIsBusiness,
+		igCategory,
+		igExternalURL,
 	}
 }
 

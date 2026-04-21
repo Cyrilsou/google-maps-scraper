@@ -41,7 +41,13 @@ type Metrics struct {
 // DefaultMetrics is exposed so /metrics handlers can report it.
 var DefaultMetrics Metrics
 
-// Client posts JSON payloads to an HTTP webhook URL.
+// Client posts JSON payloads to an webhook URL.
+//
+// Closing is synchronised via closeMu: Enqueue takes an RLock for the
+// duration of the channel send, Close takes the write Lock before calling
+// close(). This is the standard Go pattern for "multiple producers +
+// one closer", and it avoids the panic-on-closed-channel that would
+// otherwise bite us under shutdown.
 type Client struct {
 	url        string
 	secret     string
@@ -49,6 +55,7 @@ type Client struct {
 	queue      chan payload
 	wg         sync.WaitGroup
 	maxRetries int
+	closeMu    sync.RWMutex
 	closed     atomic.Bool
 }
 
@@ -101,8 +108,19 @@ func NewFromEnv() *Client {
 // queue is full the payload is dropped (DefaultMetrics.Dropped bumped) rather
 // than back-pressuring the scraper. Backpressure on the hot path is worse
 // than losing one webhook delivery in an outage.
+//
+// Send-on-closed-channel is prevented by taking closeMu.RLock for the
+// entire select — Close acquires the write lock before calling close(),
+// so we are guaranteed a consistent view of c.closed and the channel.
 func (c *Client) Enqueue(topic string, body any) {
-	if c == nil || c.closed.Load() {
+	if c == nil {
+		return
+	}
+
+	c.closeMu.RLock()
+	defer c.closeMu.RUnlock()
+
+	if c.closed.Load() {
 		return
 	}
 
@@ -133,7 +151,12 @@ func (c *Client) Close(ctx context.Context) error {
 		return nil
 	}
 
+	// Wait for in-flight Enqueues to release their RLock before we close
+	// the channel. Without this, a producer that observed closed=false
+	// would race with our close() and panic on the send.
+	c.closeMu.Lock()
 	close(c.queue)
+	c.closeMu.Unlock()
 
 	done := make(chan struct{})
 	go func() {

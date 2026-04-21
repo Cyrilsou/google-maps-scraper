@@ -2,12 +2,14 @@ package gmaps
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gosom/google-maps-scraper/instascraper"
 	"github.com/gosom/google-maps-scraper/websitescraper"
 )
 
@@ -145,7 +147,47 @@ func EnrichWebsiteContact(ctx context.Context, e *Entry) {
 		}
 	}
 
+	// Instagram enrichment: piggy-back on the social link we found during
+	// the website crawl. Opt-out via GMAPS_DISABLE_INSTAGRAM=1 in case an
+	// operator does not want IG traffic leaving their IP space.
+	if ig := contact.SocialLinks["instagram"]; ig != "" &&
+		os.Getenv("GMAPS_DISABLE_INSTAGRAM") != "1" {
+		if profile := fetchInstagram(cctx, ig); profile != nil {
+			contact.Instagram = profile
+		}
+	}
+
 	e.WebsiteContact = contact
+}
+
+// fetchInstagram runs the Instagram profile scraper and converts its
+// Profile into the gmaps-side InstagramProfile struct. Swallows
+// ErrNotFound and plain errors so enrichment never fails the scrape.
+func fetchInstagram(ctx context.Context, handleOrURL string) *InstagramProfile {
+	prof, err := instascraper.FetchProfile(ctx, getWebsiteFetcher(), handleOrURL)
+	if err != nil {
+		if !errors.Is(err, instascraper.ErrNotFound) {
+			// Non-"not found" errors are logged via the caller's
+			// channels — here we simply drop them so scraping does not
+			// fail on transient IG availability issues.
+		}
+
+		return nil
+	}
+
+	return &InstagramProfile{
+		Handle:         prof.Handle,
+		FullName:       prof.FullName,
+		Bio:            prof.Bio,
+		ExternalURL:    prof.ExternalURL,
+		ProfilePicture: prof.ProfilePicture,
+		FollowerCount:  prof.FollowerCount,
+		FollowingCount: prof.FollowingCount,
+		PostCount:      prof.PostCount,
+		IsVerified:     prof.IsVerified,
+		IsBusiness:     prof.IsBusiness,
+		Category:       prof.Category,
+	}
 }
 
 // countryISO2FromEntry does a coarse lookup of the user-facing country name

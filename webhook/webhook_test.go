@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,5 +103,57 @@ func TestClientNilSafe(t *testing.T) {
 	c.Enqueue("x", 1)
 	if err := c.Close(context.Background()); err != nil {
 		t.Errorf("Close on nil: %v", err)
+	}
+}
+
+// TestClientCloseDoesNotPanicOnConcurrentEnqueue drives the send-vs-close
+// race that existed before the closeMu RWMutex fix. Without the fix, at
+// least one iteration would panic with "send on closed channel". The test
+// keeps producers running THROUGH Close (then stops them) so the whole
+// close-lock acquisition happens under concurrent Enqueue pressure.
+func TestClientCloseDoesNotPanicOnConcurrentEnqueue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	for attempt := 0; attempt < 10; attempt++ {
+		t.Setenv("RESULT_WEBHOOK_URL", srv.URL)
+
+		c := NewFromEnv()
+		if c == nil {
+			t.Fatal("NewFromEnv returned nil")
+		}
+
+		var wg sync.WaitGroup
+		stop := make(chan struct{})
+
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						c.Enqueue("t", 1)
+					}
+				}
+			}()
+		}
+
+		// Let producers spin a bit so Close lands mid-burst.
+		time.Sleep(2 * time.Millisecond)
+
+		// Bound Close so a slow test environment does not hang the CI
+		// for minutes; the goal is only to prove the close-send race
+		// cannot panic.
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_ = c.Close(ctx)
+		cancel()
+
+		close(stop)
+		wg.Wait()
 	}
 }

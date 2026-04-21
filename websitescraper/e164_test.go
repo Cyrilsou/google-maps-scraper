@@ -18,12 +18,10 @@ func TestNormaliseE164(t *testing.T) {
 		{"0 30 1234 5678", "DE", "+493012345678"},
 		{"020 7946 0018", "UK", "+442079460018"},
 
-		// No trunk in destination country.
-		{"06 1234 5678", "IT", "+390612345678"}, // Italy keeps the leading 0, we strip user's.
-		// Actually Italy rule: we have trunk="", so no strip. Re-check:
-		// digits = "0612345678", then since IT trunk is "", we prefix
-		// directly → "+39" + "0612345678" = "+3906..." which is correct
-		// because Italian numbers retain the 0 in international form.
+		// Italy has no trunk prefix (trunk=""): Italian numbers retain
+		// their leading 0 in international form, so we emit +39 + the
+		// full national digits including the 0.
+		{"06 1234 5678", "IT", "+390612345678"},
 
 		// Unknown country leaves prefix alone.
 		{"5551234567", "XX", "+5551234567"},
