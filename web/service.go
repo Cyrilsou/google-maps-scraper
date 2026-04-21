@@ -61,9 +61,9 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("invalid file name")
 	}
 
-	// Remove every possible artefact file (CSV, XLSX or JSONL). Missing
-	// files are fine.
-	for _, ext := range []string{".csv", ".xlsx", ".jsonl"} {
+	// Remove every possible artefact file (CSV, XLSX, JSONL, GeoJSON).
+	// Missing files are fine.
+	for _, ext := range []string{".csv", ".xlsx", ".jsonl", ".geojson"} {
 		datapath := filepath.Join(s.dataFolder, id+ext)
 		if _, err := os.Stat(datapath); err == nil {
 			if err := os.Remove(datapath); err != nil {
@@ -100,7 +100,7 @@ func (s *Service) ResultFile(id, format string) (string, error) {
 	try := []string{format}
 	if format == "" {
 		// Preference order when auto-detecting: richest export first.
-		try = []string{FormatXLSX, FormatJSONL, FormatCSV}
+		try = []string{FormatXLSX, FormatGeoJSON, FormatJSONL, FormatCSV}
 	}
 
 	for _, f := range try {
@@ -177,13 +177,110 @@ func (s *Service) Preview(id string, limit int) ([]PreviewResult, error) {
 		limit = hardCap
 	}
 
-	// Prefer JSONL (structured, cheapest to read) then CSV.
+	// Prefer JSONL (structured, cheapest to read), then CSV, then
+	// GeoJSON — the latter is heavier because we have to decode a single
+	// nested JSON document, but it's still cheaper than extracting XLSX.
 	if path := filepath.Join(s.dataFolder, id+"."+FormatJSONL); fileExists(path) {
 		return previewFromJSONL(path, limit)
 	}
 
 	if path := filepath.Join(s.dataFolder, id+"."+FormatCSV); fileExists(path) {
 		return previewFromCSV(path, limit)
+	}
+
+	if path := filepath.Join(s.dataFolder, id+"."+FormatGeoJSON); fileExists(path) {
+		return previewFromGeoJSON(path, limit)
+	}
+
+	return nil, nil
+}
+
+// previewFromGeoJSON decodes the FeatureCollection and exposes the same
+// PreviewResult shape as the CSV / JSONL readers. We stream-decode the
+// outer structure and stop as soon as limit is reached so a 200 MB export
+// does not need to fit in memory for a 50-row preview.
+func previewFromGeoJSON(path string, limit int) ([]PreviewResult, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	dec := json.NewDecoder(f)
+
+	// Skip the opening brace and the "type" key; find "features".
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+
+		if key, ok := tok.(string); !ok || key != "features" {
+			// Consume the value of this key by decoding it into a
+			// throwaway so the decoder advances.
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return nil, err
+			}
+
+			continue
+		}
+
+		// We are on the "features" array.
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+
+		out := make([]PreviewResult, 0, limit)
+
+		for dec.More() && len(out) < limit {
+			var feature struct {
+				Geometry struct {
+					Coordinates []float64 `json:"coordinates"`
+				} `json:"geometry"`
+				Properties struct {
+					Title    string  `json:"title"`
+					Category string  `json:"category"`
+					Address  string  `json:"address"`
+					Website  string  `json:"website"`
+					Phone    string  `json:"phone"`
+					Rating   float64 `json:"rating"`
+					Reviews  int     `json:"reviews"`
+					Link     string  `json:"link"`
+				} `json:"properties"`
+			}
+
+			if err := dec.Decode(&feature); err != nil {
+				// Skip malformed features rather than abort the whole
+				// preview.
+				continue
+			}
+
+			r := PreviewResult{
+				Title:    feature.Properties.Title,
+				Category: feature.Properties.Category,
+				Address:  feature.Properties.Address,
+				Website:  feature.Properties.Website,
+				Phone:    feature.Properties.Phone,
+				Rating:   feature.Properties.Rating,
+				Reviews:  feature.Properties.Reviews,
+				Link:     feature.Properties.Link,
+			}
+
+			if len(feature.Geometry.Coordinates) == 2 {
+				// GeoJSON = [lon, lat].
+				r.Lon = feature.Geometry.Coordinates[0]
+				r.Lat = feature.Geometry.Coordinates[1]
+			}
+
+			out = append(out, r)
+		}
+
+		return out, nil
 	}
 
 	return nil, nil

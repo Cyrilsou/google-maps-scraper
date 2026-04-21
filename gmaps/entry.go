@@ -120,10 +120,29 @@ type WebsiteContact struct {
 	OrgSameAs       []string `json:"org_same_as,omitempty"`
 	SourceURLs      []string `json:"source_urls,omitempty"`
 	// Enrichment fields added by EnrichWebsiteContact after the raw crawl.
-	GuessedEmails  []string   `json:"guessed_emails,omitempty"`
-	TechStack      []TechItem `json:"tech_stack,omitempty"`
-	DomainAgeYears int        `json:"domain_age_years,omitempty"`
-	DomainRegistrar string    `json:"domain_registrar,omitempty"`
+	GuessedEmails   []string         `json:"guessed_emails,omitempty"`
+	TechStack       []TechItem       `json:"tech_stack,omitempty"`
+	DomainAgeYears  int              `json:"domain_age_years,omitempty"`
+	DomainRegistrar string           `json:"domain_registrar,omitempty"`
+	Instagram       *InstagramProfile `json:"instagram,omitempty"`
+}
+
+// InstagramProfile is the flat view of instascraper.Profile suitable for
+// JSON / XLSX export. Mirrored here so the gmaps public API does not
+// import instascraper (keeps the dependency graph clean and avoids an
+// import cycle if instascraper ever wants to consume gmaps helpers).
+type InstagramProfile struct {
+	Handle         string `json:"handle"`
+	FullName       string `json:"full_name,omitempty"`
+	Bio            string `json:"bio,omitempty"`
+	ExternalURL    string `json:"external_url,omitempty"`
+	ProfilePicture string `json:"profile_picture,omitempty"`
+	FollowerCount  int    `json:"follower_count,omitempty"`
+	FollowingCount int    `json:"following_count,omitempty"`
+	PostCount      int    `json:"post_count,omitempty"`
+	IsVerified     bool   `json:"is_verified,omitempty"`
+	IsBusiness     bool   `json:"is_business,omitempty"`
+	Category       string `json:"category,omitempty"`
 }
 
 // TechItem is the flat view of websitescraper.Tech suitable for JSON/XLSX

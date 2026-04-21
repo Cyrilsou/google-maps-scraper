@@ -353,6 +353,12 @@ func (w *webrunner) setupMate(_ context.Context, writer io.Writer, job *web.Job)
 		} else {
 			writers = append(writers, gmaps.NewXLSXWriter(nopCloser{writer}))
 		}
+	case web.FormatGeoJSON:
+		if wc, ok := writer.(io.WriteCloser); ok {
+			writers = append(writers, gmaps.NewGeoJSONWriter(wc))
+		} else {
+			writers = append(writers, gmaps.NewGeoJSONWriter(nopCloser{writer}))
+		}
 	case web.FormatJSONL:
 		writers = append(writers, jsonwriter.NewJSONWriter(writer))
 	default:
