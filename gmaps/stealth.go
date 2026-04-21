@@ -173,6 +173,135 @@ var (
 	warmedPages   = map[playwright.Page]struct{}{}
 )
 
+// initScripted tracks which pages already have our fingerprint shim
+// installed. Adding the same script twice would not break anything but it
+// makes the JS console noisy.
+var (
+	initScriptedMu sync.Mutex
+	initScripted   = map[playwright.Page]struct{}{}
+)
+
+// fingerprintInitScript randomises the properties Google's fingerprinting
+// scripts probe AFTER navigator.webdriver has already been spoofed by the
+// stealth adapter. Each new page reuse cycle gets a fresh roll so the
+// same IP does not always look like the same hardware.
+//
+// Values picked from the distribution of real Chrome installs on desktop.
+// We avoid extremes (e.g. hardwareConcurrency=2 on a Windows laptop is now
+// rare and looks like a VM).
+func fingerprintInitScript() string {
+	cores := []int{4, 6, 8, 8, 8, 12, 16}  // weighted toward 8
+	memory := []int{4, 8, 8, 8, 16, 16, 32}
+	timezones := []string{
+		"Europe/Paris", "Europe/Berlin", "Europe/London", "Europe/Madrid",
+		"Europe/Amsterdam", "America/New_York", "America/Chicago",
+		"America/Los_Angeles",
+	}
+	widths := []int{1280, 1366, 1440, 1536, 1600, 1680, 1920, 2560}
+	heights := map[int]int{
+		1280: 720, 1366: 768, 1440: 900, 1536: 864,
+		1600: 900, 1680: 1050, 1920: 1080, 2560: 1440,
+	}
+
+	c := cores[rand.IntN(len(cores))]
+	m := memory[rand.IntN(len(memory))]
+	tz := timezones[rand.IntN(len(timezones))]
+	w := widths[rand.IntN(len(widths))]
+	h := heights[w]
+
+	// NB: we override the *value* returned; the property remains
+	// configurable so Google's own code that writes to navigator still
+	// works. `value` + `configurable:true` matches how puppeteer-stealth
+	// does it.
+	return `(() => {
+		try {
+			Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ` + itoa(c) + `, configurable: true });
+			Object.defineProperty(navigator, 'deviceMemory',       { get: () => ` + itoa(m) + `, configurable: true });
+			Object.defineProperty(screen,    'width',              { get: () => ` + itoa(w) + `, configurable: true });
+			Object.defineProperty(screen,    'height',             { get: () => ` + itoa(h) + `, configurable: true });
+			Object.defineProperty(screen,    'availWidth',         { get: () => ` + itoa(w) + `, configurable: true });
+			Object.defineProperty(screen,    'availHeight',        { get: () => ` + itoa(h-40) + `, configurable: true });
+
+			// Override Intl.DateTimeFormat().resolvedOptions().timeZone so
+			// the timezone probe returns a consistent answer.
+			const origResolved = Intl.DateTimeFormat.prototype.resolvedOptions;
+			Intl.DateTimeFormat.prototype.resolvedOptions = function () {
+				const r = origResolved.call(this);
+				r.timeZone = '` + tz + `';
+				return r;
+			};
+
+			// webdriver is already false via stealth adapter, but double-pin.
+			Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+
+			// Some sites probe permissions.query({name:'notifications'})
+			// and flag "prompt" as suspicious; normalise to "default".
+			const origQuery = navigator.permissions && navigator.permissions.query;
+			if (origQuery) {
+				navigator.permissions.query = (params) => {
+					if (params && params.name === 'notifications') {
+						return Promise.resolve({ state: Notification.permission || 'default' });
+					}
+					return origQuery.call(navigator.permissions, params);
+				};
+			}
+		} catch (e) { /* ignored - never break the page */ }
+	})();`
+}
+
+func itoa(n int) string {
+	// Minimal inline conversion to avoid pulling strconv into stealth.
+	if n == 0 {
+		return "0"
+	}
+
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+
+	var buf [20]byte
+	i := len(buf)
+
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+
+	return string(buf[i:])
+}
+
+// InstallFingerprintShim registers fingerprintInitScript() on page so it
+// runs on every navigation. Best-effort: no-op if AddInitScript is not
+// available from the underlying driver.
+func InstallFingerprintShim(page scrapemate.BrowserPage) {
+	if page == nil {
+		return
+	}
+
+	pw, ok := page.Unwrap().(playwright.Page)
+	if !ok || pw == nil {
+		return
+	}
+
+	initScriptedMu.Lock()
+	if _, already := initScripted[pw]; already {
+		initScriptedMu.Unlock()
+		return
+	}
+
+	initScripted[pw] = struct{}{}
+	initScriptedMu.Unlock()
+
+	_ = pw.AddInitScript(playwright.Script{Content: playwright.String(fingerprintInitScript())})
+}
+
 // WarmupNavigation visits https://www.google.com/maps/ before the first
 // deep URL is loaded on this page. A user never navigates straight to a
 // place/search URL — they come from the maps root, which sets consent

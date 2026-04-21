@@ -67,6 +67,13 @@ var mainHeaders = []string{
 	"org_legal_name",
 	"org_vat_id",
 	"org_founding_date",
+	// Enrichment layer (MX-validated guesses, tech stack, domain age).
+	"guessed_emails",
+	"tech_stack",
+	"tech_ecommerce",
+	"tech_payments",
+	"domain_age_years",
+	"domain_registrar",
 }
 
 // WriteXLSX streams entries into an XLSX workbook and writes the result to w.
@@ -144,6 +151,8 @@ func writePlacesSheet(f *excelize.File, entries []*Entry) error {
 			websitePhones, socialFB, socialIG, socialLI, socialTW, socialYT string
 			hasContactForm                                                  bool
 			orgLegal, orgVAT, orgFound                                      string
+			guessedEmails, techAll, techEcom, techPay, domainRegistrar      string
+			domainAge                                                       int
 		)
 
 		if wc := e.WebsiteContact; wc != nil {
@@ -157,6 +166,30 @@ func writePlacesSheet(f *excelize.File, entries []*Entry) error {
 			orgLegal = wc.OrgLegalName
 			orgVAT = wc.OrgVATID
 			orgFound = wc.OrgFoundingDate
+			guessedEmails = strings.Join(wc.GuessedEmails, "; ")
+			domainAge = wc.DomainAgeYears
+			domainRegistrar = wc.DomainRegistrar
+
+			// Flatten tech stack: full list in one column + category
+			// shortcuts so users can filter easily in Excel.
+			allNames := make([]string, 0, len(wc.TechStack))
+			ecomNames := []string{}
+			payNames := []string{}
+
+			for _, t := range wc.TechStack {
+				allNames = append(allNames, t.Name)
+
+				switch t.Category {
+				case "ecommerce":
+					ecomNames = append(ecomNames, t.Name)
+				case "payments":
+					payNames = append(payNames, t.Name)
+				}
+			}
+
+			techAll = strings.Join(allNames, "; ")
+			techEcom = strings.Join(ecomNames, "; ")
+			techPay = strings.Join(payNames, "; ")
 		}
 
 		row := []any{
@@ -203,6 +236,12 @@ func writePlacesSheet(f *excelize.File, entries []*Entry) error {
 			orgLegal,
 			orgVAT,
 			orgFound,
+			guessedEmails,
+			techAll,
+			techEcom,
+			techPay,
+			domainAge,
+			domainRegistrar,
 		}
 
 		if err := sw.SetRow(cell, row); err != nil {

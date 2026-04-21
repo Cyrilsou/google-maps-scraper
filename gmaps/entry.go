@@ -119,6 +119,19 @@ type WebsiteContact struct {
 	OrgAddress      string   `json:"org_address,omitempty"`
 	OrgSameAs       []string `json:"org_same_as,omitempty"`
 	SourceURLs      []string `json:"source_urls,omitempty"`
+	// Enrichment fields added by EnrichWebsiteContact after the raw crawl.
+	GuessedEmails  []string   `json:"guessed_emails,omitempty"`
+	TechStack      []TechItem `json:"tech_stack,omitempty"`
+	DomainAgeYears int        `json:"domain_age_years,omitempty"`
+	DomainRegistrar string    `json:"domain_registrar,omitempty"`
+}
+
+// TechItem is the flat view of websitescraper.Tech suitable for JSON/XLSX
+// export.
+type TechItem struct {
+	Name     string `json:"name"`
+	Category string `json:"category,omitempty"`
+	Version  string `json:"version,omitempty"`
 }
 
 func (e *Entry) haversineDistance(lat, lon float64) float64 {
