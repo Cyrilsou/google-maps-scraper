@@ -327,20 +327,18 @@ func scroll(ctx context.Context,
 	maxDepth int,
 	scrollSelector string,
 ) (int, error) {
+	// The scroll JS now also reports the number of place cards currently
+	// rendered, so we can break early when both the scroll height AND the
+	// visible-cards count stop growing. Relying on height alone is brittle:
+	// Google sometimes pads the feed with recommendation blocks that change
+	// scrollHeight without actually loading a new result.
 	expr := `async () => {
 		const el = document.querySelector("` + scrollSelector + `");
-		// Humanise: most scrolls advance 70-100% of the remaining height,
-		// but every few iterations we either overshoot slightly (going
-		// past the bottom, clamped by the browser) or scroll UP a bit
-		// to simulate a user who double-checks a place. A real user
-		// never reaches the bottom in identical, monotonic jumps.
 		const r = Math.random();
 		let target;
 		if (r < 0.08) {
-			// 8%: nudge upwards 5-15%
 			target = Math.max(0, el.scrollTop - el.clientHeight * (0.05 + Math.random() * 0.10));
 		} else if (r < 0.18) {
-			// 10%: big jump (overshoot)
 			target = el.scrollTop + (el.scrollHeight - el.scrollTop) * (1.1 + Math.random() * 0.3);
 		} else {
 			target = el.scrollTop + (el.scrollHeight - el.scrollTop) * (0.7 + Math.random() * 0.3);
@@ -348,19 +346,23 @@ func scroll(ctx context.Context,
 		el.scrollTop = target;
 
 		return new Promise((resolve) => {
-  			setTimeout(() => {
-    		resolve(el.scrollHeight);
-  			}, %d);
+			setTimeout(() => {
+				// Count place cards via the hrefs of the feed anchors.
+				const cards = document.querySelectorAll('div[role="feed"] div[jsaction] > a');
+				// "end of list" marker shown by Google Maps when no more results.
+				const ended = !!document.querySelector('p.fontBodyMedium > span > span, span.HlvSq');
+				resolve({ h: el.scrollHeight, n: cards.length, end: ended });
+			}, %d);
 		});
 	}`
 
-	var currentScrollHeight int
-	// Scroll to the bottom of the page.
-	waitTime := 100.
-	cnt := 0
-	// Require two consecutive stagnant scrolls before giving up: Google Maps
-	// lazy-loads, so one idle frame does not mean the feed is exhausted.
-	stagnant := 0
+	var (
+		currentScrollHeight int
+		currentCount        int
+		waitTime            = 100.
+		cnt                 = 0
+		stagnant            = 0
+	)
 
 	const (
 		minWaitMS     = 500
@@ -371,7 +373,6 @@ func scroll(ctx context.Context,
 	for i := 0; i < maxDepth; i++ {
 		cnt++
 
-		// Progressive wait up to maxWaitMS, jittered to look less robotic.
 		waitMS := minWaitMS + (i * 300)
 		if waitMS > maxWaitMS {
 			waitMS = maxWaitMS
@@ -379,24 +380,19 @@ func scroll(ctx context.Context,
 
 		waitMS = jitterMS(waitMS)
 
-		// Scroll to the bottom of the page.
-		scrollHeight, err := page.Eval(fmt.Sprintf(expr, waitMS))
+		raw, err := page.Eval(fmt.Sprintf(expr, waitMS))
 		if err != nil {
 			return cnt, err
 		}
 
-		// Handle both int and float64 because browser-evaluated numbers may arrive as either type.
-		var height int
-		switch v := scrollHeight.(type) {
-		case int:
-			height = v
-		case float64:
-			height = int(v)
-		default:
-			return cnt, fmt.Errorf("scrollHeight is not a number, got %T", scrollHeight)
+		height, count, ended := parseScrollResult(raw)
+
+		if ended {
+			// Google told us there is nothing more; stop immediately.
+			break
 		}
 
-		if height == currentScrollHeight {
+		if height == currentScrollHeight && count == currentCount {
 			stagnant++
 			if stagnant >= stagnantLimit {
 				break
@@ -406,6 +402,7 @@ func scroll(ctx context.Context,
 		}
 
 		currentScrollHeight = height
+		currentCount = count
 
 		select {
 		case <-ctx.Done():
@@ -423,4 +420,36 @@ func scroll(ctx context.Context,
 	}
 
 	return cnt, nil
+}
+
+// parseScrollResult extracts {h, n, end} from the JS scroll helper while
+// tolerating the older shape where it returned just a number.
+func parseScrollResult(raw any) (height, count int, ended bool) {
+	switch v := raw.(type) {
+	case map[string]any:
+		height = anyToInt(v["h"])
+		count = anyToInt(v["n"])
+		if b, ok := v["end"].(bool); ok {
+			ended = b
+		}
+	case int:
+		height = v
+	case float64:
+		height = int(v)
+	}
+
+	return height, count, ended
+}
+
+func anyToInt(v any) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case float64:
+		return int(x)
+	case int64:
+		return int(x)
+	}
+
+	return 0
 }

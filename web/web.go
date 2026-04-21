@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/gosom/google-maps-scraper/gmaps"
 )
 
 //go:embed static
@@ -116,6 +118,32 @@ func New(svc *Service, addr string) (*Server, error) {
 		}
 
 		ans.download(w, r)
+	})
+
+	// /preview returns up to ?limit=N (default 50, max 500) rows from the
+	// job's CSV or JSONL, as structured JSON for the in-browser viewer.
+	mux.HandleFunc("/api/v1/jobs/{id}/preview", func(w http.ResponseWriter, r *http.Request) {
+		r = requestWithID(r)
+
+		if r.Method != http.MethodGet {
+			renderJSON(w, http.StatusMethodNotAllowed, apiError{Code: http.StatusMethodNotAllowed, Message: "Method not allowed"})
+
+			return
+		}
+
+		ans.preview(w, r)
+	})
+
+	// /stats exposes live block/OK counters so the dashboard can warn
+	// operators when their proxy pool is burning.
+	mux.HandleFunc("/api/v1/stats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			renderJSON(w, http.StatusMethodNotAllowed, apiError{Code: http.StatusMethodNotAllowed, Message: "Method not allowed"})
+
+			return
+		}
+
+		ans.stats(w, r)
 	})
 
 	handler := securityHeaders(mux)
@@ -238,9 +266,9 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		Zoom:     15,
 		FastMode: false,
 		Radius:   10000,
-		Lat:      "0",
-		Lon:      "0",
-		Depth:    10,
+		Lat:      "",
+		Lon:      "",
+		Depth:    20,
 		Email:    false,
 	}
 
@@ -622,6 +650,76 @@ func (s *Server) apiGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	renderJSON(w, http.StatusOK, job)
+}
+
+// preview streams up to ?limit=N rows of the job's result artefact as JSON.
+// CSV and JSONL are supported; XLSX jobs must be downloaded.
+func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
+	id, ok := getIDFromRequest(r)
+	if !ok {
+		renderJSON(w, http.StatusUnprocessableEntity, apiError{Code: http.StatusUnprocessableEntity, Message: "Invalid ID"})
+
+		return
+	}
+
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	results, err := s.svc.Preview(id.String(), limit)
+	if err != nil {
+		renderJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: err.Error()})
+
+		return
+	}
+
+	resp := struct {
+		Count   int                    `json:"count"`
+		Results []PreviewResult        `json:"results"`
+		Meta    map[string]interface{} `json:"meta"`
+	}{
+		Count:   len(results),
+		Results: results,
+		Meta: map[string]interface{}{
+			"limit":       limit,
+			"total_count": s.svc.ResultCount(id.String()),
+		},
+	}
+
+	renderJSON(w, http.StatusOK, resp)
+}
+
+// stats returns the live scraper block/OK counters plus the top proxies by
+// block count. The data is advisory — scrapemate owns proxy rotation — but
+// it tells operators whether the pool is healthy.
+func (s *Server) stats(w http.ResponseWriter, _ *http.Request) {
+	blocks, okCount := gmaps.DefaultProxyStats.Totals()
+
+	snap := gmaps.DefaultProxyStats.Snapshot()
+	// Cap the snapshot we return so a misconfigured 1000-proxy pool does
+	// not dump a giant payload on every poll.
+	const maxEntries = 20
+	if len(snap) > maxEntries {
+		snap = snap[:maxEntries]
+	}
+
+	renderJSON(w, http.StatusOK, map[string]interface{}{
+		"blocks":         blocks,
+		"ok":             okCount,
+		"block_rate_pct": percent(blocks, blocks+okCount),
+		"top_proxies":    snap,
+	})
+}
+
+func percent(part, total int64) float64 {
+	if total == 0 {
+		return 0
+	}
+
+	return float64(part) * 100 / float64(total)
 }
 
 func (s *Server) apiDeleteJob(w http.ResponseWriter, r *http.Request) {

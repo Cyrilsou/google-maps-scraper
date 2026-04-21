@@ -34,6 +34,9 @@ type Job struct {
 	Date   time.Time
 	Status string
 	Data   JobData
+	// ResultCount is populated on read (Get/Select) by peeking at the
+	// exported CSV/JSONL file. Not persisted; lossy for XLSX-only jobs.
+	ResultCount int `json:"result_count,omitempty"`
 }
 
 func (j *Job) Validate() error {

@@ -1,15 +1,28 @@
-<tr>
-    <td>{{.ID}}</td>
+<tr data-job-id="{{.ID}}" data-status="{{.Status}}">
+    <td class="mono">{{.ID}}</td>
     <td>{{.Name}}</td>
     <td>{{.Date}}</td>
     <td>
         <span class="status-indicator status-{{.Status}}">{{.Status}}</span>
     </td>
-    <td>
+    <td class="num">{{ if gt .ResultCount 0 }}{{ .ResultCount }}{{ else }}—{{ end }}</td>
+    <td class="actions-cell">
         {{ if eq .Status "ok" }}
-            <a href="/download?id={{.ID}}" download class="button download-button">Download</a>
+            <button type="button" class="button preview-button"
+                    onclick="window.__gmapsPreview && window.__gmapsPreview('{{.ID}}', '{{.Name}}')">
+                Preview
+            </button>
+            <div class="dropdown">
+                <button type="button" class="button download-button dropdown-toggle">Download ▾</button>
+                <div class="dropdown-menu">
+                    <a href="/download?id={{.ID}}" download>Default</a>
+                    <a href="/download?id={{.ID}}&format=csv" download>CSV</a>
+                    <a href="/download?id={{.ID}}&format=xlsx" download>Excel (.xlsx)</a>
+                    <a href="/download?id={{.ID}}&format=jsonl" download>JSON Lines</a>
+                </div>
+            </div>
         {{ end }}
-        <button hx-delete="/delete?id={{.ID}}" 
+        <button hx-delete="/delete?id={{.ID}}"
                 hx-target="closest tr"
                 hx-swap="outerHTML"
                 hx-confirm="Are you sure you want to delete this job?"
