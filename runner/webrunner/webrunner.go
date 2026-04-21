@@ -14,6 +14,8 @@ import (
 
 	"github.com/gosom/google-maps-scraper/deduper"
 	"github.com/gosom/google-maps-scraper/exiter"
+	"github.com/gosom/google-maps-scraper/gmaps"
+	"github.com/gosom/google-maps-scraper/grid"
 	"github.com/gosom/google-maps-scraper/runner"
 	"github.com/gosom/google-maps-scraper/tlmt"
 	"github.com/gosom/google-maps-scraper/web"
@@ -144,7 +146,8 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 		return w.svc.Update(ctx, job)
 	}
 
-	outpath := filepath.Join(w.cfg.DataFolder, job.ID+".csv")
+	format := job.Data.ResolvedFormat()
+	outpath := filepath.Join(w.cfg.DataFolder, job.ID+"."+format)
 
 	outfile, err := os.Create(outpath)
 	if err != nil {
@@ -177,25 +180,61 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 	dedup := deduper.New()
 	exitMonitor := exiter.New()
 
-	seedJobs, err := runner.CreateSeedJobs(
-		job.Data.FastMode,
-		job.Data.Lang,
-		strings.NewReader(strings.Join(job.Data.Keywords, "\n")),
-		job.Data.Depth,
-		job.Data.Email,
-		coords,
-		job.Data.Zoom,
-		func() float64 {
-			if job.Data.Radius <= 0 {
-				return 10000 // 10 km
+	var seedJobs []scrapemate.IJob
+
+	switch {
+	case job.Data.GridBBox != "":
+		// Grid-scraping mode: divide the bbox into cells to bypass the
+		// ~120-results-per-search cap Google Maps imposes.
+		bbox, bboxErr := grid.ParseBoundingBox(job.Data.GridBBox)
+		if bboxErr != nil {
+			err2 := w.svc.Update(ctx, job)
+			if err2 != nil {
+				log.Printf("failed to update job status: %v", err2)
 			}
 
-			return float64(job.Data.Radius)
-		}(),
-		dedup,
-		exitMonitor,
-		w.cfg.ExtraReviews || job.Data.ExtraReviews,
-	)
+			return fmt.Errorf("invalid grid_bbox: %w", bboxErr)
+		}
+
+		cell := job.Data.GridCellKm
+		if cell <= 0 {
+			cell = 1.0
+		}
+
+		seedJobs, err = runner.CreateGridSeedJobs(
+			job.Data.Lang,
+			strings.NewReader(strings.Join(job.Data.Keywords, "\n")),
+			job.Data.Depth,
+			job.Data.Email,
+			bbox,
+			cell,
+			job.Data.Zoom,
+			dedup,
+			exitMonitor,
+			w.cfg.ExtraReviews || job.Data.ExtraReviews,
+		)
+	default:
+		seedJobs, err = runner.CreateSeedJobs(
+			job.Data.FastMode,
+			job.Data.Lang,
+			strings.NewReader(strings.Join(job.Data.Keywords, "\n")),
+			job.Data.Depth,
+			job.Data.Email,
+			coords,
+			job.Data.Zoom,
+			func() float64 {
+				if job.Data.Radius <= 0 {
+					return 10000 // 10 km
+				}
+
+				return float64(job.Data.Radius)
+			}(),
+			dedup,
+			exitMonitor,
+			w.cfg.ExtraReviews || job.Data.ExtraReviews,
+		)
+	}
+
 	if err != nil {
 		err2 := w.svc.Update(ctx, job)
 		if err2 != nil {
@@ -286,9 +325,18 @@ func (w *webrunner) setupMate(_ context.Context, writer io.Writer, job *web.Job)
 
 	log.Printf("job %s has proxy: %v", job.ID, hasProxy)
 
-	csvWriter := csvwriter.NewCsvWriter(csv.NewWriter(writer))
-
-	writers := []scrapemate.ResultWriter{csvWriter}
+	var writers []scrapemate.ResultWriter
+	if job.Data.ResolvedFormat() == web.FormatXLSX {
+		// The XLSX writer needs to close the underlying file after writing
+		// the ZIP footer, so we wrap the passed io.Writer accordingly.
+		if wc, ok := writer.(io.WriteCloser); ok {
+			writers = append(writers, gmaps.NewXLSXWriter(wc))
+		} else {
+			writers = append(writers, gmaps.NewXLSXWriter(nopCloser{writer}))
+		}
+	} else {
+		writers = append(writers, csvwriter.NewCsvWriter(csv.NewWriter(writer)))
+	}
 
 	matecfg, err := scrapemateapp.NewConfig(
 		writers,
@@ -300,3 +348,9 @@ func (w *webrunner) setupMate(_ context.Context, writer io.Writer, job *web.Job)
 
 	return scrapemateapp.NewScrapeMateApp(matecfg)
 }
+
+// nopCloser adapts an io.Writer to io.WriteCloser for writers (like
+// bytes.Buffer) that do not implement Close.
+type nopCloser struct{ io.Writer }
+
+func (nopCloser) Close() error { return nil }

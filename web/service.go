@@ -37,14 +37,17 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("invalid file name")
 	}
 
-	datapath := filepath.Join(s.dataFolder, id+".csv")
-
-	if _, err := os.Stat(datapath); err == nil {
-		if err := os.Remove(datapath); err != nil {
+	// Remove both possible artefact files (a job may have been exported as
+	// either CSV or XLSX). Missing files are fine.
+	for _, ext := range []string{".csv", ".xlsx"} {
+		datapath := filepath.Join(s.dataFolder, id+ext)
+		if _, err := os.Stat(datapath); err == nil {
+			if err := os.Remove(datapath); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
 			return err
 		}
-	} else if !os.IsNotExist(err) {
-		return err
 	}
 
 	return s.repo.Delete(ctx, id)
@@ -59,15 +62,32 @@ func (s *Service) SelectPending(ctx context.Context) ([]Job, error) {
 }
 
 func (s *Service) GetCSV(_ context.Context, id string) (string, error) {
+	return s.ResultFile(id, FormatCSV)
+}
+
+// ResultFile returns the path to the result artefact for a job, picking the
+// CSV or XLSX variant based on format. If format is empty, both are checked
+// (XLSX first) so callers can stay format-agnostic.
+func (s *Service) ResultFile(id, format string) (string, error) {
 	if strings.Contains(id, "/") || strings.Contains(id, "\\") || strings.Contains(id, "..") {
 		return "", fmt.Errorf("invalid file name")
 	}
 
-	datapath := filepath.Join(s.dataFolder, id+".csv")
-
-	if _, err := os.Stat(datapath); os.IsNotExist(err) {
-		return "", fmt.Errorf("csv file not found for job %s", id)
+	try := []string{format}
+	if format == "" {
+		try = []string{FormatXLSX, FormatCSV}
 	}
 
-	return datapath, nil
+	for _, f := range try {
+		if f == "" {
+			continue
+		}
+
+		path := filepath.Join(s.dataFolder, id+"."+f)
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+
+	return "", fmt.Errorf("result file not found for job %s", id)
 }

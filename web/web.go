@@ -144,7 +144,10 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 
-		err := s.srv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		err := s.srv.Shutdown(shutdownCtx)
 		if err != nil {
 			log.Println(err)
 
@@ -332,6 +335,27 @@ func (s *Server) scrape(w http.ResponseWriter, r *http.Request) {
 
 	newJob.Data.Email = r.Form.Get("email") == "on"
 
+	if f := r.Form.Get("format"); f == FormatXLSX {
+		newJob.Data.Format = FormatXLSX
+	} else {
+		newJob.Data.Format = FormatCSV
+	}
+
+	// Optional grid scraping: a bounding box + cell size to bypass the
+	// ~120 results/search limit Google Maps enforces.
+	if bbox := strings.TrimSpace(r.Form.Get("grid_bbox")); bbox != "" {
+		newJob.Data.GridBBox = bbox
+		if cellStr := strings.TrimSpace(r.Form.Get("grid_cell_km")); cellStr != "" {
+			if v, parseErr := strconv.ParseFloat(cellStr, 64); parseErr == nil && v > 0 {
+				newJob.Data.GridCellKm = v
+			}
+		}
+
+		if newJob.Data.GridCellKm <= 0 {
+			newJob.Data.GridCellKm = 1.0
+		}
+	}
+
 	proxies := strings.Split(r.Form.Get("proxies"), "\n")
 	if len(proxies) > 0 {
 		for _, p := range proxies {
@@ -381,7 +405,7 @@ func (s *Server) getJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobs, err := s.svc.All(context.Background())
+	jobs, err := s.svc.All(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 
@@ -398,8 +422,6 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
-
 	id, ok := getIDFromRequest(r)
 	if !ok {
 		http.Error(w, "Invalid ID", http.StatusUnprocessableEntity)
@@ -407,7 +429,13 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath, err := s.svc.GetCSV(ctx, id.String())
+	// Allow the client to request a specific format, e.g. ?format=xlsx.
+	format := r.URL.Query().Get("format")
+	if format != FormatCSV && format != FormatXLSX {
+		format = ""
+	}
+
+	filePath, err := s.svc.ResultFile(id.String(), format)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -421,8 +449,14 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	fileName := filepath.Base(filePath)
+	contentType := "text/csv"
+
+	if strings.HasSuffix(strings.ToLower(fileName), ".xlsx") {
+		contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	}
+
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
-	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Type", contentType)
 
 	_, err = io.Copy(w, file)
 	if err != nil {
@@ -627,12 +661,12 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+
-				"script-src 'self' cdn.redoc.ly cdnjs.cloudflare.com 'unsafe-inline' 'unsafe-eval'; "+
+				"script-src 'self' cdn.redoc.ly cdnjs.cloudflare.com unpkg.com 'unsafe-inline' 'unsafe-eval'; "+
 				"worker-src 'self' blob:; "+
-				"style-src 'self' 'unsafe-inline' fonts.googleapis.com; "+
-				"img-src 'self' data: cdn.redoc.ly; "+
+				"style-src 'self' 'unsafe-inline' fonts.googleapis.com unpkg.com; "+
+				"img-src 'self' data: cdn.redoc.ly *.tile.openstreetmap.org unpkg.com; "+
 				"font-src 'self' fonts.gstatic.com; "+
-				"connect-src 'self'")
+				"connect-src 'self' nominatim.openstreetmap.org")
 
 		next.ServeHTTP(w, r)
 	})
