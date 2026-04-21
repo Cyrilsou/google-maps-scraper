@@ -34,6 +34,9 @@ type Job struct {
 	Date   time.Time
 	Status string
 	Data   JobData
+	// ResultCount is populated on read (Get/Select) by peeking at the
+	// exported CSV/JSONL file. Not persisted; lossy for XLSX-only jobs.
+	ResultCount int `json:"result_count,omitempty"`
 }
 
 func (j *Job) Validate() error {
@@ -85,8 +88,9 @@ type JobData struct {
 
 // Output formats accepted by the web runner.
 const (
-	FormatCSV  = "csv"
-	FormatXLSX = "xlsx"
+	FormatCSV   = "csv"
+	FormatXLSX  = "xlsx"
+	FormatJSONL = "jsonl"
 )
 
 // ResolvedFormat returns the output format, defaulting to CSV for backward
@@ -95,6 +99,8 @@ func (d *JobData) ResolvedFormat() string {
 	switch d.Format {
 	case FormatXLSX:
 		return FormatXLSX
+	case FormatJSONL, "json":
+		return FormatJSONL
 	default:
 		return FormatCSV
 	}

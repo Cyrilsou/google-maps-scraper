@@ -166,3 +166,48 @@ func InstallStealthRouting(page scrapemate.BrowserPage) {
 	})
 }
 
+// warmedPages remembers which pages have already hit the maps root so we do
+// not double-warmup on page reuse.
+var (
+	warmedPagesMu sync.Mutex
+	warmedPages   = map[playwright.Page]struct{}{}
+)
+
+// WarmupNavigation visits https://www.google.com/maps/ before the first
+// deep URL is loaded on this page. A user never navigates straight to a
+// place/search URL — they come from the maps root, which sets consent
+// cookies, session storage and the referer chain. Skipping the warmup is a
+// subtle bot tell. Called once per page across its lifetime.
+//
+// Errors are swallowed because this is best-effort: if the warmup itself
+// gets blocked, the caller will hit the block on the real URL anyway and
+// the existing ErrBlocked path handles it.
+func WarmupNavigation(page scrapemate.BrowserPage) {
+	if page == nil {
+		return
+	}
+
+	pwPage, ok := page.Unwrap().(playwright.Page)
+	if !ok || pwPage == nil {
+		// Fall back to the scrapemate interface - still useful, just no
+		// dedup across reuse.
+		_, _ = page.Goto("https://www.google.com/maps/", scrapemate.WaitUntilDOMContentLoaded)
+		page.WaitForTimeout(jitter(400 * time.Millisecond))
+
+		return
+	}
+
+	warmedPagesMu.Lock()
+	if _, already := warmedPages[pwPage]; already {
+		warmedPagesMu.Unlock()
+		return
+	}
+
+	warmedPages[pwPage] = struct{}{}
+	warmedPagesMu.Unlock()
+
+	_, _ = page.Goto("https://www.google.com/maps/", scrapemate.WaitUntilDOMContentLoaded)
+	// Small idle time so the session cookies settle before the real query.
+	page.WaitForTimeout(jitter(400 * time.Millisecond))
+}
+

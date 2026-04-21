@@ -149,6 +149,7 @@ func (j *PlaceJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPa
 	var resp scrapemate.Response
 
 	InstallStealthRouting(page)
+	WarmupNavigation(page)
 
 	pageResponse, err := page.Goto(j.GetURL(), scrapemate.WaitUntilDOMContentLoaded)
 	if err != nil {
@@ -158,6 +159,7 @@ func (j *PlaceJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPa
 	}
 
 	if isBlockedResponse(page.URL(), nil) {
+		DefaultProxyStats.RecordBlock("")
 		resp.Error = ErrBlocked
 		return resp
 	}

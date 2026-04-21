@@ -89,14 +89,26 @@ type Config struct {
 	Version    bool
 }
 
-//nolint:gocyclo // The cyclomatic complexity of this function is high due to the number of configuration options and validations.
+// ParseConfig is a convenience wrapper that preserves the original
+// panic-on-invalid-config signature for callers that expect it. Prefer
+// ParseConfigErr in new code so main can exit gracefully and emit telemetry.
 func ParseConfig() *Config {
+	cfg, err := ParseConfigErr()
+	if err != nil {
+		panic(err)
+	}
+
+	return cfg
+}
+
+//nolint:gocyclo // The cyclomatic complexity of this function is high due to the number of configuration options and validations.
+func ParseConfigErr() (*Config, error) {
 	cfg := Config{}
 
 	if os.Getenv("PLAYWRIGHT_INSTALL_ONLY") == "1" {
 		cfg.RunMode = RunModeInstallPlaywright
 
-		return &cfg
+		return &cfg, nil
 	}
 
 	var (
@@ -176,31 +188,31 @@ func ParseConfig() *Config {
 	}
 
 	if cfg.AwsLambdaInvoker && cfg.FunctionName == "" {
-		panic("FunctionName must be provided when using AwsLambdaInvoker")
+		return nil, fmt.Errorf("FunctionName must be provided when using AwsLambdaInvoker")
 	}
 
 	if cfg.AwsLambdaInvoker && cfg.S3Bucket == "" {
-		panic("S3Bucket must be provided when using AwsLambdaInvoker")
+		return nil, fmt.Errorf("S3Bucket must be provided when using AwsLambdaInvoker")
 	}
 
 	if cfg.AwsLambdaInvoker && cfg.InputFile == "" {
-		panic("InputFile must be provided when using AwsLambdaInvoker")
+		return nil, fmt.Errorf("InputFile must be provided when using AwsLambdaInvoker")
 	}
 
 	if cfg.Concurrency < 1 {
-		panic("Concurrency must be greater than 0")
+		return nil, fmt.Errorf("Concurrency must be greater than 0")
 	}
 
 	if cfg.MaxDepth < 1 {
-		panic("MaxDepth must be greater than 0")
+		return nil, fmt.Errorf("MaxDepth must be greater than 0")
 	}
 
 	if cfg.Zoom < 0 || cfg.Zoom > 21 {
-		panic("Zoom must be between 0 and 21")
+		return nil, fmt.Errorf("Zoom must be between 0 and 21")
 	}
 
 	if cfg.Dsn == "" && cfg.ProduceOnly {
-		panic("Dsn must be provided when using ProduceOnly")
+		return nil, fmt.Errorf("Dsn must be provided when using ProduceOnly")
 	}
 
 	if proxies != "" {
@@ -225,10 +237,10 @@ func ParseConfig() *Config {
 	case cfg.Dsn != "":
 		cfg.RunMode = RunModeDatabase
 	default:
-		panic("Invalid configuration")
+		return nil, fmt.Errorf("invalid configuration")
 	}
 
-	return &cfg
+	return &cfg, nil
 }
 
 var (
