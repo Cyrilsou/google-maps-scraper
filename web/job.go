@@ -73,6 +73,31 @@ type JobData struct {
 	ExtraReviews bool          `json:"extra_reviews"`
 	MaxTime      time.Duration `json:"max_time"`
 	Proxies      []string      `json:"proxies"`
+	// Format picks the output file type: "csv" (default, streaming) or
+	// "xlsx" (multi-sheet Excel workbook written at job completion).
+	Format string `json:"format,omitempty"`
+	// GridBBox activates grid scraping to bypass Google's ~120 results cap.
+	// Format: "minLat,minLon,maxLat,maxLon". Empty = disabled.
+	GridBBox string `json:"grid_bbox,omitempty"`
+	// GridCellKm is the cell size in kilometres when GridBBox is set.
+	GridCellKm float64 `json:"grid_cell_km,omitempty"`
+}
+
+// Output formats accepted by the web runner.
+const (
+	FormatCSV  = "csv"
+	FormatXLSX = "xlsx"
+)
+
+// ResolvedFormat returns the output format, defaulting to CSV for backward
+// compatibility with existing jobs whose Format field is empty.
+func (d *JobData) ResolvedFormat() string {
+	switch d.Format {
+	case FormatXLSX:
+		return FormatXLSX
+	default:
+		return FormatCSV
+	}
 }
 
 func (d *JobData) Validate() error {

@@ -531,9 +531,9 @@ func parseReviews(reviewsI []any) []Review {
 		// "report this photo" URL, not the actual hosted image. See issue #240.
 		imgs := getNthElementAndCast[[]any](el, 2, 2)
 		for j := range imgs {
-			url := getNthElementAndCast[string](imgs, j, 1, 6, 0)
-			if url != "" {
-				review.Images = append(review.Images, url)
+			imgURL := getNthElementAndCast[string](imgs, j, 1, 6, 0)
+			if imgURL != "" {
+				review.Images = append(review.Images, imgURL)
 			}
 		}
 

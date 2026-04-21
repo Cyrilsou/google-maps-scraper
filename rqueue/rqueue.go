@@ -84,6 +84,32 @@ func GetScrapeWatchdogMetrics() ScrapeWatchdogMetrics {
 	}
 }
 
+// workerMaxConcurrencyFromEnv reads WORKER_CONCURRENCY. It is clamped to
+// [1, 16]: going above one without a rotating proxy pool almost always
+// triggers Google's block page and does more harm than good.
+func workerMaxConcurrencyFromEnv() int {
+	raw := os.Getenv("WORKER_CONCURRENCY")
+	if raw == "" {
+		return 1
+	}
+
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		log.Warn("invalid WORKER_CONCURRENCY, falling back to 1", "value", raw)
+
+		return 1
+	}
+
+	const hardCap = 16
+	if n > hardCap {
+		log.Warn("WORKER_CONCURRENCY clamped to hard cap", "requested", n, "cap", hardCap)
+
+		return hardCap
+	}
+
+	return n
+}
+
 type ScrapeJobArgs struct {
 	Keyword        string  `json:"keyword"`
 	Lang           string  `json:"lang"`
@@ -462,7 +488,11 @@ func NewClient(dbPool *pgxpool.Pool, encryptionKey []byte) (*Client, error) {
 // NewWorkerClient creates a new Client for worker mode.
 // This client only processes scrape jobs. Maintenance jobs (worker provisioning,
 // deletion) are handled by the server's River client.
-// Worker-mode concurrency is intentionally fixed to one River worker per process.
+//
+// Concurrency defaults to one River worker per process (one active scrape at
+// a time per IP) which is the safest setting when there is no proxy rotation.
+// Operators who have a proxy pool large enough to absorb parallel scrapes can
+// raise it via the WORKER_CONCURRENCY env var.
 func NewWorkerClient(dbPool *pgxpool.Pool, manager ScrapeManager) (*Client, error) {
 	logger := log.With("component", "river-worker")
 
@@ -471,9 +501,11 @@ func NewWorkerClient(dbPool *pgxpool.Pool, manager ScrapeManager) (*Client, erro
 		Manager: manager,
 	})
 
+	maxWorkers := workerMaxConcurrencyFromEnv()
+
 	riverClient, err := river.NewClient(riverpgxv5.New(dbPool), &river.Config{
 		Queues: map[string]river.QueueConfig{
-			river.QueueDefault: {MaxWorkers: 1},
+			river.QueueDefault: {MaxWorkers: maxWorkers},
 		},
 		Workers:              workers,
 		Logger:               logger,

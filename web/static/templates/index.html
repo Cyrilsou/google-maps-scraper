@@ -5,7 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Google Maps Scraper</title>
     <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin="" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/1.9.6/htmx.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+    <style>
+        #map { height: 320px; width: 100%; margin-bottom: 10px; border: 1px solid #ccc; }
+        .map-toolbar { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+        .map-toolbar input { flex: 1 1 180px; }
+        .map-estimate { font-size: 12px; color: #555; margin-top: 4px; min-height: 1.2em; }
+    </style>
 </head>
 <body>
     <div class="app-container">
@@ -65,12 +79,23 @@
                         </div>
                     </fieldset>
                     
-                    <details class="expandable-section">
-                        <summary>Location Settings</summary>
+                    <details class="expandable-section" open>
+                        <summary>Location</summary>
                         <fieldset>
+                            <p class="text-muted" style="margin-top:0"><small>
+                                Search for a city, click the map to pick a point, or draw a rectangle to
+                                scan a whole area (grid scraping — bypasses Google's ~120-results cap).
+                            </small></p>
+                            <div class="map-toolbar">
+                                <input type="text" id="place-search" placeholder="Search a city or address (Enter)" />
+                                <button type="button" id="place-search-btn">Search</button>
+                                <button type="button" id="clear-location">Clear</button>
+                            </div>
+                            <div id="map"></div>
+                            <div class="map-estimate" id="map-estimate"></div>
                             <div class="form-group">
                                 <label for="zoom">Zoom:</label>
-                                <input type="number" id="zoom" name="zoom" value="{{.Zoom}}">
+                                <input type="number" id="zoom" name="zoom" value="{{.Zoom}}" min="1" max="21">
                             </div>
                             <div class="form-group">
                                 <label for="latitude">Latitude:</label>
@@ -80,12 +105,28 @@
                                 <label for="longitude">Longitude:</label>
                                 <input type="number" step="0.000000000000001" id="longitude" name="longitude" value="{{.Lon}}">
                             </div>
+                            <div class="form-group">
+                                <label for="grid_bbox">Area bounding box (grid scraping):</label>
+                                <input type="text" id="grid_bbox" name="grid_bbox"
+                                       placeholder="minLat,minLon,maxLat,maxLon (or draw on the map)" />
+                            </div>
+                            <div class="form-group">
+                                <label for="grid_cell_km">Grid cell size (km):</label>
+                                <input type="number" step="0.1" min="0.2" id="grid_cell_km" name="grid_cell_km" value="1.0" />
+                            </div>
                         </fieldset>
                     </details>
                     
                     <details class="expandable-section">
                         <summary>Advanced Options</summary>
                         <fieldset>
+                            <div class="form-group">
+                                <label for="format">Output format:</label>
+                                <select id="format" name="format">
+                                    <option value="csv">CSV (streaming, universal)</option>
+                                    <option value="xlsx">Excel (.xlsx, multi-sheet)</option>
+                                </select>
+                            </div>
                             <div class="form-group">
                                 <label for="fastmode">Fast Mode (BETA):</label>
                                 <input type="checkbox" id="fastmode" name="fastmode" {{if .FastMode}}checked{{end}}>
@@ -154,6 +195,168 @@ function hideSponsor() {
         sponsorSection.style.display = 'none';
     }
 }
+</script>
+
+<script>
+// -------- Location picker (Leaflet + OpenStreetMap + Nominatim geocoding) --------
+//
+// - Click anywhere on the map to set latitude/longitude (used by Radius mode).
+// - Draw a rectangle to set the grid bounding box (used by grid-scraping mode).
+// - Search an address/city to center the map (Nominatim, no API key).
+// - An inline estimate shows roughly how many grid cells a bbox implies, so
+//   users don't accidentally submit a 10,000-cell job.
+(function () {
+    const mapEl = document.getElementById('map');
+    if (!mapEl || typeof L === 'undefined') return;
+
+    const latInput = document.getElementById('latitude');
+    const lonInput = document.getElementById('longitude');
+    const bboxInput = document.getElementById('grid_bbox');
+    const cellInput = document.getElementById('grid_cell_km');
+    const estimateEl = document.getElementById('map-estimate');
+    const searchInput = document.getElementById('place-search');
+    const searchBtn = document.getElementById('place-search-btn');
+    const clearBtn = document.getElementById('clear-location');
+
+    const initialLat = parseFloat(latInput.value) || 48.8566;
+    const initialLon = parseFloat(lonInput.value) || 2.3522;
+
+    const map = L.map('map').setView([initialLat, initialLon], 5);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19
+    }).addTo(map);
+
+    const drawn = new L.FeatureGroup().addTo(map);
+    let pointMarker = null;
+    let rect = null;
+
+    const drawControl = new L.Control.Draw({
+        position: 'topright',
+        draw: {
+            polygon: false, polyline: false, circle: false,
+            circlemarker: false, marker: false,
+            rectangle: { shapeOptions: { color: '#2b7cff' } }
+        },
+        edit: { featureGroup: drawn, remove: true }
+    });
+    map.addControl(drawControl);
+
+    function setPoint(lat, lon) {
+        latInput.value = lat.toFixed(6);
+        lonInput.value = lon.toFixed(6);
+
+        if (pointMarker) { map.removeLayer(pointMarker); }
+        pointMarker = L.marker([lat, lon]).addTo(map);
+    }
+
+    function setBBox(b) {
+        if (rect) { drawn.removeLayer(rect); rect = null; }
+        if (!b) { bboxInput.value = ''; refreshEstimate(); return; }
+
+        const value = [b.minLat, b.minLon, b.maxLat, b.maxLon]
+            .map(v => v.toFixed(6)).join(',');
+        bboxInput.value = value;
+
+        rect = L.rectangle(
+            [[b.minLat, b.minLon], [b.maxLat, b.maxLon]],
+            { color: '#2b7cff', weight: 2, fillOpacity: 0.08 }
+        );
+        drawn.addLayer(rect);
+        refreshEstimate();
+    }
+
+    function refreshEstimate() {
+        if (!estimateEl) return;
+        const raw = (bboxInput.value || '').trim();
+        if (!raw) { estimateEl.textContent = ''; return; }
+
+        const parts = raw.split(',').map(s => parseFloat(s.trim()));
+        if (parts.length !== 4 || parts.some(isNaN)) {
+            estimateEl.textContent = 'Invalid bounding box.';
+            return;
+        }
+
+        const [minLat, minLon, maxLat, maxLon] = parts;
+        const cellKm = Math.max(0.2, parseFloat(cellInput.value) || 1);
+
+        // Approximate cell counts using 111.32 km per degree of latitude.
+        const kmPerDegLat = 111.32;
+        const latKm = (maxLat - minLat) * kmPerDegLat;
+        const avgLat = (minLat + maxLat) / 2;
+        const lonKm = (maxLon - minLon) * kmPerDegLat * Math.cos(avgLat * Math.PI / 180);
+        const cells = Math.max(1, Math.ceil(latKm / cellKm) * Math.ceil(lonKm / cellKm));
+        const minutes = Math.ceil(cells * 0.5);
+        estimateEl.textContent = `~${cells} grid cells (${latKm.toFixed(1)}×${lonKm.toFixed(1)} km), est. ${minutes} min.`;
+    }
+
+    map.on('click', function (e) { setPoint(e.latlng.lat, e.latlng.lng); });
+
+    map.on(L.Draw.Event.CREATED, function (e) {
+        if (e.layerType !== 'rectangle') return;
+        const b = e.layer.getBounds();
+        setBBox({
+            minLat: b.getSouth(), minLon: b.getWest(),
+            maxLat: b.getNorth(), maxLon: b.getEast()
+        });
+    });
+
+    map.on(L.Draw.Event.DELETED, function () { setBBox(null); });
+
+    if (cellInput) { cellInput.addEventListener('input', refreshEstimate); }
+    if (bboxInput) { bboxInput.addEventListener('input', refreshEstimate); }
+
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function () {
+            if (pointMarker) { map.removeLayer(pointMarker); pointMarker = null; }
+            setBBox(null);
+            latInput.value = '';
+            lonInput.value = '';
+        });
+    }
+
+    async function geocode(q) {
+        if (!q) return;
+        const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q);
+        const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+        if (!res.ok) throw new Error('geocoding failed: ' + res.status);
+        const data = await res.json();
+        if (!data.length) throw new Error('not found');
+        const first = data[0];
+        const lat = parseFloat(first.lat);
+        const lon = parseFloat(first.lon);
+        setPoint(lat, lon);
+        if (first.boundingbox && first.boundingbox.length === 4) {
+            const bb = first.boundingbox.map(parseFloat);
+            setBBox({ minLat: bb[0], maxLat: bb[1], minLon: bb[2], maxLon: bb[3] });
+            map.fitBounds([[bb[0], bb[2]], [bb[1], bb[3]]]);
+        } else {
+            map.setView([lat, lon], 13);
+        }
+    }
+
+    if (searchBtn) {
+        searchBtn.addEventListener('click', () => geocode(searchInput.value).catch(err => {
+            estimateEl.textContent = 'Geocoding: ' + err.message;
+        }));
+    }
+    if (searchInput) {
+        searchInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); searchBtn.click(); }
+        });
+    }
+
+    // Bubble up whatever the form pre-filled so the UI stays in sync.
+    if (latInput.value && lonInput.value) {
+        const la = parseFloat(latInput.value), lo = parseFloat(lonInput.value);
+        if (!isNaN(la) && !isNaN(lo) && (la !== 0 || lo !== 0)) { setPoint(la, lo); }
+    }
+    if (bboxInput.value) { refreshEstimate(); }
+
+    // Invalidate size once the details pane is expanded after initial render.
+    setTimeout(() => map.invalidateSize(), 200);
+})();
 </script>
 </body>
 </html>

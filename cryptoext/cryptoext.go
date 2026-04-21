@@ -21,9 +21,13 @@ import (
 
 // GenerateBackupCodes generates a set of backup codes for 2FA.
 func GenerateBackupCodes(num int) ([]string, error) {
+	if num <= 0 {
+		return nil, fmt.Errorf("num must be > 0")
+	}
+
 	codes := make([]string, num)
 
-	for i := range 10 {
+	for i := range num {
 		b := make([]byte, 4)
 		if _, err := rand.Read(b); err != nil {
 			return nil, err
