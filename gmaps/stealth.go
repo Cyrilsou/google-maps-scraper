@@ -3,6 +3,7 @@ package gmaps
 import (
 	"errors"
 	"math/rand/v2"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,22 @@ import (
 // interstitial instead of the expected page. Scrapemate treats this as a
 // retryable error so the job can be re-queued on another proxy.
 var ErrBlocked = errors.New("google maps: blocked (captcha / unusual traffic)")
+
+// stealthDisabled is checked by every stealth hook so the whole stack can
+// be turned off with a single env var. Useful as an escape hatch when a
+// stealth mechanism causes a hang on a specific platform / Chromium build
+// (we saw this on Windows + cold Playwright install: Playwright Goto hung
+// indefinitely with our global Route handler installed, and scrapemate's
+// Goto API does not honour the scrape context so the 10-min deadline did
+// not unblock it).
+//
+// Set GMAPS_NO_STEALTH=1 to disable:
+//   - InstallStealthRouting (tracker / font abort via playwright.Route)
+//   - InstallFingerprintShim (AddInitScript navigator overrides)
+//   - WarmupNavigation (pre-visit to google.com/maps)
+var stealthDisabled = func() bool {
+	return os.Getenv("GMAPS_NO_STEALTH") == "1"
+}
 
 // jitterMS returns base±30% in milliseconds. Fixed sleeps are a strong
 // bot signal; every delay in the scraper is jittered through this helper.
@@ -206,7 +223,7 @@ func PageFlagsStats() (int, int) { return pageFlagsStats() }
 // optimisation and the scrape should proceed even on Playwright-internal
 // quirks (e.g. reused-page teardown races).
 func InstallStealthRouting(page scrapemate.BrowserPage) {
-	if page == nil {
+	if page == nil || stealthDisabled() {
 		return
 	}
 
@@ -344,7 +361,7 @@ func itoa(n int) string {
 // runs on every navigation. Best-effort: no-op if AddInitScript is not
 // available from the underlying driver.
 func InstallFingerprintShim(page scrapemate.BrowserPage) {
-	if page == nil {
+	if page == nil || stealthDisabled() {
 		return
 	}
 
@@ -370,7 +387,7 @@ func InstallFingerprintShim(page scrapemate.BrowserPage) {
 // gets blocked, the caller will hit the block on the real URL anyway and
 // the existing ErrBlocked path handles it.
 func WarmupNavigation(page scrapemate.BrowserPage) {
-	if page == nil {
+	if page == nil || stealthDisabled() {
 		return
 	}
 
@@ -388,7 +405,17 @@ func WarmupNavigation(page scrapemate.BrowserPage) {
 		return
 	}
 
-	_, _ = page.Goto("https://www.google.com/maps/", scrapemate.WaitUntilDOMContentLoaded)
+	// Use Playwright's native Goto directly so we can bound it with a
+	// hard timeout. scrapemate's BrowserPage.Goto API does not accept
+	// a timeout, and we have seen cases on Windows + cold Chromium
+	// where the navigation hangs forever, defeating the outer scrape
+	// context. 15 s is enough for a healthy warmup; anything slower
+	// would already be disqualifying for a normal scrape.
+	_, _ = pwPage.Goto("https://www.google.com/maps/", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+		Timeout:   playwright.Float(15000),
+	})
+
 	// Small idle time so the session cookies settle before the real query.
 	page.WaitForTimeout(jitter(400 * time.Millisecond))
 }
