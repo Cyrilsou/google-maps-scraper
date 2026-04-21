@@ -56,6 +56,17 @@ var mainHeaders = []string{
 	"emails",
 	"image_count",
 	"review_extracted_count",
+	// From the website scraper (optional - populated when -email is on).
+	"website_phones",
+	"has_contact_form",
+	"social_facebook",
+	"social_instagram",
+	"social_linkedin",
+	"social_twitter",
+	"social_youtube",
+	"org_legal_name",
+	"org_vat_id",
+	"org_founding_date",
 }
 
 // WriteXLSX streams entries into an XLSX workbook and writes the result to w.
@@ -129,6 +140,25 @@ func writePlacesSheet(f *excelize.File, entries []*Entry) error {
 			return err
 		}
 
+		var (
+			websitePhones, socialFB, socialIG, socialLI, socialTW, socialYT string
+			hasContactForm                                                  bool
+			orgLegal, orgVAT, orgFound                                      string
+		)
+
+		if wc := e.WebsiteContact; wc != nil {
+			websitePhones = strings.Join(wc.Phones, "; ")
+			hasContactForm = wc.HasContactForm
+			socialFB = wc.SocialLinks["facebook"]
+			socialIG = wc.SocialLinks["instagram"]
+			socialLI = wc.SocialLinks["linkedin"]
+			socialTW = wc.SocialLinks["twitter"]
+			socialYT = wc.SocialLinks["youtube"]
+			orgLegal = wc.OrgLegalName
+			orgVAT = wc.OrgVATID
+			orgFound = wc.OrgFoundingDate
+		}
+
 		row := []any{
 			e.ID,
 			e.Link,
@@ -163,6 +193,16 @@ func writePlacesSheet(f *excelize.File, entries []*Entry) error {
 			strings.Join(e.Emails, "; "),
 			len(e.Images),
 			len(e.UserReviews) + len(e.UserReviewsExtended),
+			websitePhones,
+			hasContactForm,
+			socialFB,
+			socialIG,
+			socialLI,
+			socialTW,
+			socialYT,
+			orgLegal,
+			orgVAT,
+			orgFound,
 		}
 
 		if err := sw.SetRow(cell, row); err != nil {

@@ -95,6 +95,30 @@ type Entry struct {
 	UserReviews         []Review               `json:"user_reviews"`
 	UserReviewsExtended []Review               `json:"user_reviews_extended"`
 	Emails              []string               `json:"emails"`
+	// WebsiteContact is populated when -email / ExtractEmail is enabled. It
+	// contains the full contact signal extracted by the websitescraper pkg.
+	WebsiteContact *WebsiteContact `json:"website_contact,omitempty"`
+}
+
+// WebsiteContact mirrors websitescraper.ContactProfile but lives in gmaps
+// so the Entry JSON schema does not leak an import cycle. The two types are
+// converted by FillWebsiteContact.
+type WebsiteContact struct {
+	Emails         []string          `json:"emails,omitempty"`
+	Phones         []string          `json:"phones,omitempty"`
+	SocialLinks    map[string]string `json:"social_links,omitempty"`
+	HasContactForm bool              `json:"has_contact_form,omitempty"`
+	// OrgName, OrgEmail, etc. flatten the schema.org Organization fields to
+	// keep the XLSX export simple — one row per place.
+	OrgName         string   `json:"org_name,omitempty"`
+	OrgLegalName    string   `json:"org_legal_name,omitempty"`
+	OrgTelephone    string   `json:"org_telephone,omitempty"`
+	OrgVATID        string   `json:"org_vat_id,omitempty"`
+	OrgFoundingDate string   `json:"org_founding_date,omitempty"`
+	OrgNumEmployees string   `json:"org_num_employees,omitempty"`
+	OrgAddress      string   `json:"org_address,omitempty"`
+	OrgSameAs       []string `json:"org_same_as,omitempty"`
+	SourceURLs      []string `json:"source_urls,omitempty"`
 }
 
 func (e *Entry) haversineDistance(lat, lon float64) float64 {
